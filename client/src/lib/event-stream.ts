@@ -1,4 +1,5 @@
 import type { CallStatus } from "@/types/call";
+import type { ChatMessage } from "@/types/chat";
 import type { SessionInfo, SessionState } from "@/types/session";
 
 type CallListRow = {
@@ -21,7 +22,12 @@ export type BrokerEvent =
   | { type: "call-status"; sessionId: string; id: string; owner: string | null; status: CallStatus; peer: string; startedAt: number }
   | { type: "call-ended"; sessionId: string; id: string; owner: string | null; reason: string; endedAt: number }
   | { type: "incoming"; sessionId: string; id: string; peer: string; offeredAt: number }
-  | { type: "incoming-claimed"; sessionId: string; id: string; owner: string };
+  | { type: "incoming-claimed"; sessionId: string; id: string; owner: string }
+  | { type: "message"; sessionId: string; message: ChatMessage }
+  | { type: "message-status"; sessionId: string; ids: string[]; status: string }
+  | { type: "message-media"; sessionId: string; id: string; mediaUrl: string; mediaType: string }
+  | { type: "presence"; sessionId: string; jid: string; lastSeen: number; unavailable: boolean }
+  | { type: "chat-presence"; sessionId: string; jid: string; sender: string; state: string };
 
 type Listener = (ev: BrokerEvent) => void;
 

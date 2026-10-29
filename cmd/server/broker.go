@@ -203,6 +203,14 @@ func (b *Broker) emitIncomingClaimed(sessionID, id, owner string) {
 	b.broadcast(map[string]any{"type": "incoming-claimed", "sessionId": sessionID, "id": id, "owner": owner})
 }
 
+func (b *Broker) emitMessage(m *StoredMessage) {
+	b.broadcast(map[string]any{"type": "message", "sessionId": m.SessionID, "message": m})
+}
+
+func (b *Broker) emitRaw(ev any) {
+	b.broadcast(ev)
+}
+
 func (b *Broker) historyRows(sessionID string, limit int) []CallRecord {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

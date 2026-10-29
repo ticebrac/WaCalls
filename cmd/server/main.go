@@ -18,6 +18,8 @@ func main() {
 	staticDir := flag.String("static", "client/dist", "static client directory (optional)")
 	debug := flag.Bool("debug", false, "verbose logging")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
+	apiKey := flag.String("api-key", "", "API key for Evolution-compatible routes (header 'apikey'); empty disables auth")
+	dataDir := flag.String("data-dir", "data", "data directory for media storage")
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -30,7 +32,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
+	srv, err := newServer(ctx, *dbPath, *staticDir, *dataDir, *apiKey, *maxCalls, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)

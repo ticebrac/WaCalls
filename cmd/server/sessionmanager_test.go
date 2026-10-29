@@ -30,7 +30,16 @@ func newTestManager(t *testing.T) *SessionManager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newSessionManager(ctx, container, NewBroker(), store, waLog.Noop, slog.Default(), 0)
+	msgs, err := newMsgStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	media, err := newMediaStore(filepath.Join(t.TempDir(), "media"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := newWebhookDispatcher(msgs)
+	return newSessionManager(ctx, container, NewBroker(), store, msgs, media, hooks, waLog.Noop, slog.Default(), 0)
 }
 
 func (m *SessionManager) addUnconnected(t *testing.T, name string) *Session {

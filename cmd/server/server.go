@@ -15,6 +15,8 @@ type server struct {
 	sessions  *SessionManager
 	log       *slog.Logger
 	staticDir string
+	apiKey    string
+	media     *mediaStore
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -27,7 +29,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log *slog.Logger) (*server, error) {
+func newServer(ctx context.Context, dbPath, staticDir, dataDir, apiKey string, maxCalls int, log *slog.Logger) (*server, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
@@ -40,6 +42,15 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 	if err != nil {
 		return nil, err
 	}
+	msgs, err := newMsgStore(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	media, err := newMediaStore(dataDir + "/media")
+	if err != nil {
+		return nil, err
+	}
+	hooks := newWebhookDispatcher(msgs)
 
 	waLogger := waLog.Noop
 	if log.Enabled(ctx, slog.LevelDebug) {
@@ -47,8 +58,8 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 	}
 
 	broker := NewBroker()
-	mgr := newSessionManager(ctx, container, broker, store, waLogger, log, maxCalls)
+	mgr := newSessionManager(ctx, container, broker, store, msgs, media, hooks, waLogger, log, maxCalls)
 	broker.SnapshotFn = mgr.snapshotEvents
 
-	return &server{broker: broker, sessions: mgr, log: log, staticDir: staticDir}, nil
+	return &server{broker: broker, sessions: mgr, log: log, staticDir: staticDir, apiKey: apiKey, media: media}, nil
 }

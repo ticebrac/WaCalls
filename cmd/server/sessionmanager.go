@@ -17,6 +17,9 @@ type SessionManager struct {
 	container *sqlstore.Container
 	broker    *Broker
 	store     *sessionStore
+	msgs      *msgStore
+	media     *mediaStore
+	hooks     *webhookDispatcher
 	waLogger  waLog.Logger
 	log       *slog.Logger
 	maxCalls  int
@@ -26,12 +29,15 @@ type SessionManager struct {
 	order    []string
 }
 
-func newSessionManager(ctx context.Context, container *sqlstore.Container, broker *Broker, store *sessionStore, waLogger waLog.Logger, log *slog.Logger, maxCalls int) *SessionManager {
+func newSessionManager(ctx context.Context, container *sqlstore.Container, broker *Broker, store *sessionStore, msgs *msgStore, media *mediaStore, hooks *webhookDispatcher, waLogger waLog.Logger, log *slog.Logger, maxCalls int) *SessionManager {
 	return &SessionManager{
 		appCtx:    ctx,
 		container: container,
 		broker:    broker,
 		store:     store,
+		msgs:      msgs,
+		media:     media,
+		hooks:     hooks,
 		waLogger:  waLogger,
 		log:       log,
 		maxCalls:  maxCalls,
@@ -63,6 +69,20 @@ func (m *SessionManager) Get(id string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
 	return s, ok
+}
+
+func (m *SessionManager) ByInstance(name string) (*Session, bool) {
+	if s, ok := m.Get(name); ok {
+		return s, true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.sessions {
+		if s.name == name {
+			return s, true
+		}
+	}
+	return nil, false
 }
 
 func (m *SessionManager) infos() []SessionInfo {
@@ -120,7 +140,13 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 }
 
 func (m *SessionManager) Create(name string) (string, error) {
-	id := newSessionID()
+	return m.CreateNamed(newSessionID(), name)
+}
+
+func (m *SessionManager) CreateNamed(id, name string) (string, error) {
+	if _, exists := m.Get(id); exists {
+		return "", fmt.Errorf("instance %s already exists", id)
+	}
 	if err := m.store.insert(m.appCtx, id, name); err != nil {
 		return "", err
 	}

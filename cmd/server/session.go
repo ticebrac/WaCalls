@@ -150,8 +150,22 @@ func (s *Session) handleEvent(rawEvt any) {
 			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
 		}
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
+		s.mgr.hooks.dispatch(ctx, s.id, s.id, EvConnectionUpdate, map[string]any{
+			"instance": s.id, "state": "open",
+		})
 	case *events.LoggedOut:
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+		s.mgr.hooks.dispatch(ctx, s.id, s.id, EvConnectionUpdate, map[string]any{
+			"instance": s.id, "state": "close", "reason": "logged_out",
+		})
+	case *events.Message:
+		s.handleMessageEvent(evt)
+	case *events.Receipt:
+		s.handleReceiptEvent(evt)
+	case *events.Presence:
+		s.handlePresenceEvent(evt)
+	case *events.ChatPresence:
+		s.handleChatPresenceEvent(evt)
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
 	case *events.CallAccept:
@@ -196,6 +210,9 @@ func (s *Session) startPairing(ctx context.Context) error {
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				s.setAuth(AuthSnapshot{State: "qr", QR: evt.Code})
 				s.mgr.broker.emitSessionQR(s.id, evt.Code)
+				s.mgr.hooks.dispatch(context.Background(), s.id, s.id, EvQrCodeUpdated, map[string]any{
+					"qrcode": map[string]any{"instance": s.id, "code": evt.Code, "base64": qrDataURL(evt.Code)},
+				})
 			case "success":
 				if id := s.client.Store.ID; id != nil {
 					_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())

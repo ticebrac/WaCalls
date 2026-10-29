@@ -5,7 +5,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/s
 import { Sidebar } from "./Sidebar";
 import { ThemeToggle } from "./ThemeToggle";
 
-export const AppShell = ({ children }: { children: ReactNode }) => {
+export const AppShell = ({ children, viewSwitch }: { children: ReactNode; viewSwitch?: ReactNode }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
@@ -28,7 +28,10 @@ export const AppShell = ({ children }: { children: ReactNode }) => {
           </span>
           <span className="text-lg font-semibold tracking-tight">WaCalls</span>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          {viewSwitch}
+          <ThemeToggle />
+        </div>
       </header>
       <div className="flex flex-1">
         <aside className="hidden w-64 shrink-0 border-r md:block">
