@@ -1,0 +1,2709 @@
+openapi: 3.1.0
+info:
+  title: WaCebrac API
+  version: 1.0.0
+  description: |
+    API completa do WaCebrac — gateway WhatsApp com ligações VoIP, gravações e
+    integração de CRM.
+
+    Três superfícies coexistem:
+
+    | Superfície | Rotas | Autenticação |
+    |---|---|---|
+    | **CRM** | `/api/crm/*` | obrigatória: `apikey` + `X-User-Id` |
+    | **Painel** | `/api/*` (sessions, chats, calls, events) | nenhuma (identidade por `X-Client-Id`) |
+    | **Evolution** | `/instance`, `/message`, `/chat`, `/group`, `/webhook` | `apikey` (header `apikey` ou `Authorization: Bearer`) |
+
+    A chave é definida uma única vez no start do servidor (`-api-key`) e vale
+    para o CRM e para a Evolution. Sem ela, `/api/crm/*` responde 503 e as
+    rotas Evolution ficam sem exigência de chave.
+
+    Guia humano com exemplos e fluxos: `API-CRM.md` (CRM) e `API.md` (geral).
+  contact:
+    name: WaCebrac
+servers:
+  - url: http://localhost:11000
+    description: Servidor local padrão
+tags:
+  - name: CRM
+    description: API para o CRM (coletar, monitorar e executar)
+  - name: Sessions
+    description: Instâncias/contas WhatsApp (painel)
+  - name: Chats
+    description: Conversas e mensagens (painel)
+  - name: Calls
+    description: Ligações e gravações (painel)
+  - name: Events
+    description: Eventos em tempo real (SSE)
+  - name: Evolution
+    description: API compatível com Evolution (instâncias, mensagens, grupos, webhooks)
+
+security:
+  - apiKeyHeader: []
+
+paths:
+  # ==========================================================================
+  # CRM — coletar, monitorar e executar (ver API-CRM.md)
+  # ==========================================================================
+  /api/crm/status:
+    get:
+      tags: [CRM]
+      summary: Estado para o CRM (origem do colaborador, instances, ligações ativas)
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "200":
+          description: Estado atual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  origin:
+                    type: string
+                    description: Instância de origem do colaborador ("" se não definida)
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionInfo"
+                  activeCalls:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LiveCall"
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/events:
+    get:
+      tags: [CRM]
+      summary: Eventos em tempo real filtrados pelo colaborador
+      description: |
+        Stream SSE (`text/event-stream`) com keepalive `: ping` a cada 20 s.
+        Entrega apenas: `session-list`, `auth-state`, `session-qr`,
+        `message` (de leads do colaborador), `call-status`/`call-ended`
+        (com `owner` do colaborador) e `call-list` (já filtrado).
+        Outros eventos do servidor são descartados.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "200":
+          description: Fluxo de eventos Server-Sent Events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Cada evento é uma linha `data: {json}\n\n`. Exemplos:
+
+                  `data: {"type":"message","sessionId":"...","message":{...}}`
+
+                  `data: {"type":"call-status","id":"...","status":"ringing","owner":"ana.paula",...}`
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/sessions:
+    get:
+      tags: [CRM]
+      summary: Lista as instâncias WhatsApp
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "200":
+          description: Instâncias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SessionInfo"
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    post:
+      tags: [CRM]
+      summary: Cria uma instância e inicia o pareamento (QR)
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  default: Session
+                  description: Nome exibido da instância
+      responses:
+        "200":
+          description: Instância criada; consulte GET /api/crm/sessions/{sid}/qr
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: Identificador da instância (usar em todos os caminhos {sid})
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "500":
+          description: Falha ao criar (pairing não iniciou)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/sessions/{sid}:
+    parameters:
+      - $ref: "#/components/parameters/sid"
+    patch:
+      tags: [CRM]
+      summary: Renomeia a instância
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        "204": { description: Renomeada }
+        "400":
+          description: Nome vazio ou body inválido
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    delete:
+      tags: [CRM]
+      summary: Desconecta e exclui a instância
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "204": { description: Excluída (logout no WhatsApp + remoção local) }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/sessions/{sid}/qr:
+    get:
+      tags: [CRM]
+      summary: QR code de pareamento
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "200":
+          description: Estado do pareamento
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairingState" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/sessions/{sid}/disconnect:
+    post:
+      tags: [CRM]
+      summary: Desconecta a instância (mantém para novo pareamento)
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "204": { description: Desconectada (estado "logged_out"; use POST .../sessions ou o painel para re-parear) }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/origin:
+    get:
+      tags: [CRM]
+      summary: Instância de origem do colaborador autenticado
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "200":
+          description: Origem atual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                    description: String vazia quando nao definida
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    put:
+      tags: [CRM]
+      summary: Define a instância de origem do colaborador
+      description: |
+        Instância usada para falar com os leads DESTE colaborador. Os leads
+        herdam a origem no momento em que são criados; leads já criados
+        permanecem na instância onde nasceram.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+      responses:
+        "204": { description: Origem definida }
+        "400":
+          description: sessionId ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    delete:
+      tags: [CRM]
+      summary: Limpa a origem do colaborador
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "204": { description: Origem removida }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/leads:
+    get:
+      tags: [CRM]
+      summary: Leads do colaborador autenticado
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      responses:
+        "200":
+          description: Leads com dono = X-User-Id (mais recentes primeiro)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  leads:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Lead"
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    post:
+      tags: [CRM]
+      summary: Assume um lead (chamar ao abrir o modal)
+      description: |
+        Registra o lead com dono fixo = `X-User-Id` e instância de origem do
+        colaborador. Idempotente: se já for seu, devolve o mesmo; se for de
+        outro, responde 403.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "(41) 99123-5566"
+                  description: Número do lead (com ou sem +55; pontuação é ignorada)
+                name:
+                  type: string
+                  description: Nome do lead (guardado quando vazio)
+      responses:
+        "200":
+          description: Lead (assumido ou já existente)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lead:
+                    $ref: "#/components/schemas/Lead"
+        "400":
+          description: phone ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Lead pertence a outro colaborador, ou chave apikey inválida
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Colaborador sem instância de origem (PUT /api/crm/origin)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Erro interno
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/leads/{phone}:
+    delete:
+      tags: [CRM]
+      summary: Libera a atribuição de um lead
+      description: Remove o claim; o número volta a poder ser assumido por qualquer colaborador.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - $ref: "#/components/parameters/phone"
+      responses:
+        "204": { description: Claim removido }
+        "404":
+          description: Nenhum lead para este número
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  /api/crm/leads/{phone}/messages:
+    parameters:
+      - $ref: "#/components/parameters/phone"
+    get:
+      tags: [CRM]
+      summary: Conversa do lead (botão "Conversar com o lead")
+      description: |
+        Assume o lead automaticamente se ainda não tiver dono. As mensagens
+        vêm em ordem **crescente** (mais antiga em cima), prontas para render.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: before
+          in: query
+          description: Timestamp (ms) da última mensagem que o cliente já tem — pagina para trás
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Conversa
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lead:
+                    $ref: "#/components/schemas/Lead"
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StoredMessage"
+        "400":
+          description: phone ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Lead de outro colaborador (ou chave inválida)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância do lead foi excluída
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Sem instância de origem
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Erro interno
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    post:
+      tags: [CRM]
+      summary: Envia uma mensagem para o lead
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+      responses:
+        "200":
+          description: Mensagem enviada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  timestamp: { type: integer, format: int64 }
+        "400":
+          description: text ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Lead de outro colaborador (ou chave inválida)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância do lead não existe mais
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Sem instância de origem
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha no envio
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada (ou API desabilitada)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/crm/calls:
+    get:
+      tags: [CRM]
+      summary: Histórico de ligações do colaborador
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 500 }
+      responses:
+        "200":
+          description: Ligações iniciadas por este colaborador (mais recentes primeiro)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  calls:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CallLog"
+        "400": { $ref: "#/components/responses/MissingUser" }
+        "403": { $ref: "#/components/responses/InvalidKey" }
+        "500":
+          description: Erro interno
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+    post:
+      tags: [CRM]
+      summary: Liga para o lead (botão "Ligar via WhatsApp")
+      description: |
+        Assume o lead (mesmas regras do POST /leads) e disca da instância de
+        origem do colaborador. `owner` da ligação = `X-User-Id`, o que limita
+        uma ligação ativa por colaborador (409) e define o histórico.
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "(41) 99123-5566" }
+                name: { type: string, description: Nome usado se o lead ainda não existir }
+                record:
+                  type: boolean
+                  default: true
+                  description: Gravar a ligação
+                duration_ms:
+                  type: integer
+                  default: 300000
+                  description: Duração máxima em milissegundos
+      responses:
+        "200":
+          description: Ligação iniciada (estado "ringing")
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call:
+                    type: object
+                    properties:
+                      callId: { type: string }
+                      sessionId: { type: string }
+        "400":
+          description: phone ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Lead de outro colaborador (ou chave inválida)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância do lead não existe mais
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "Sem instância de origem, ou o colaborador já está em ligação"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Limite de ligações simultâneas na sessão
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha ao iniciar (oferta não pôde ser enviada)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada (ou API desabilitada)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/crm/calls/{id}/end:
+    post:
+      tags: [CRM]
+      summary: Encerra uma ligação ativa do colaborador
+      security:
+        - apiKeyHeader: []
+          userIdHeader: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+          description: callId devolvido por POST /api/crm/calls
+      responses:
+        "204": { description: Encerrada }
+        "403":
+          description: Ligação de outro colaborador (ou chave inválida)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Ligação inexistente (ou sessão removida)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Disabled" }
+
+  # ==========================================================================
+  # PAINEL — rotas usadas pela SPA operador (sem autenticação)
+  # ==========================================================================
+  /api/sessions:
+    get:
+      tags: [Sessions]
+      summary: Lista as instâncias
+      responses:
+        "200":
+          description: Instâncias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionInfo" }
+    post:
+      tags: [Sessions]
+      summary: Cria uma instância e inicia o pareamento
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, default: Session }
+      responses:
+        "200":
+          description: Instância criada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+        "500":
+          description: Falha ao criar
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}:
+    parameters:
+      - $ref: "#/components/parameters/sid"
+    delete:
+      tags: [Sessions]
+      summary: Exclui a instância (logout + remoção local)
+      responses:
+        "204": { description: Excluída }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/qr:
+    get:
+      tags: [Sessions]
+      summary: QR code de pareamento
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "200":
+          description: Estado do pareamento
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairingState" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/logout:
+    post:
+      tags: [Sessions]
+      summary: Desconecta a instância
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "204": { description: Desconectada }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/pair:
+    post:
+      tags: [Sessions]
+      summary: Reinicia o pareamento (novo QR)
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "204": { description: Pareamento reiniciado }
+        "400":
+          description: Instância já pareada ou falha no pairing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/calls:
+    parameters:
+      - $ref: "#/components/parameters/sid"
+    post:
+      tags: [Calls]
+      summary: Inicia uma ligação (leg do navegador faz o /webrtc em seguida)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "5541991235566" }
+                duration_ms: { type: integer, default: 300000 }
+                record: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Ligação iniciada (ringing)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call:
+                    type: object
+                    properties:
+                      callId: { type: string }
+        "400":
+          description: phone ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Operador já em ligação (X-Client-Id)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Limite de ligações simultâneas
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha ao iniciar
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [Calls]
+      summary: Histórico de ligações da instância
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 500 }
+        - name: peer
+          in: query
+          description: Número do contato (normalizado com 55)
+          schema: { type: string }
+      responses:
+        "200":
+          description: Registros persistidos (com gravação quando houver)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  calls:
+                    type: array
+                    items: { $ref: "#/components/schemas/CallLog" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/calls/{id}:
+    parameters:
+      - $ref: "#/components/parameters/sid"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Calls]
+      summary: Um registro de ligação (sem envelope)
+      responses:
+        "200":
+          description: Registro
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CallLog" }
+        "404":
+          description: Ligação inexistente ou instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Calls]
+      summary: Encerra a ligação ativa
+      responses:
+        "204": { description: Encerrada }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/calls/{id}/webrtc:
+    post:
+      tags: [Calls]
+      summary: Troca SDP browser ↔ ponte (oferta do navegador, resposta do servidor)
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sdp_offer]
+              properties:
+                sdp_offer: { type: string, description: SDP de RTCPeerConnection.createOffer() }
+      responses:
+        "200":
+          description: Resposta SDP
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sdp_answer: { type: string }
+        "400":
+          description: sdp_offer ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Ligação ou instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha na ponte WebRTC
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/calls/{id}/accept:
+    post:
+      tags: [Calls]
+      summary: Aceita uma ligação recebida
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/clientId"
+      responses:
+        "200":
+          description: Aceita
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call:
+                    type: object
+                    properties:
+                      callId: { type: string }
+        "404":
+          description: Ligação ou instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Operador já em outra ligação ou chamada já reivindicada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha ao aceitar
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/calls/{id}/reject:
+    post:
+      tags: [Calls]
+      summary: Rejeita uma ligação recebida
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Rejeitada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/history:
+    get:
+      tags: [Calls]
+      summary: Histórico recente em memória (últimas 50)
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "200":
+          description: Linhas do histórico
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items: { $ref: "#/components/schemas/LiveCall" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/recordings/{sid}/{file}:
+    get:
+      tags: [Calls]
+      summary: Download da gravação (.wav)
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: file
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[^/\\\\]+\\.wav$" }
+      responses:
+        "200":
+          description: Áudio WAV
+          content:
+            audio/wav:
+              schema: { type: string, format: binary }
+        "404":
+          description: Arquivo inexistente ou nome inválido (travessia de diretório bloqueada)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/chats:
+    get:
+      tags: [Chats]
+      summary: Lista de conversas (mais ativa primeiro)
+      parameters:
+        - $ref: "#/components/parameters/sid"
+      responses:
+        "200":
+          description: Conversas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chats:
+                    type: array
+                    items: { $ref: "#/components/schemas/ChatSummary" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/messages:
+    get:
+      tags: [Chats]
+      summary: Mensagens de uma conversa
+      description: |
+        A resposta vem em ordem **decrescente** (mais nova primeiro). O painel
+        inverte no cliente (`stores/chats.ts`) para renderizar de cima para
+        baixo; integrações devem ordenar por `timestamp` como preferirem.
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: chat
+          in: query
+          required: true
+          schema: { type: string }
+          description: "JID da conversa (ex.: 5541991235566@s.whatsapp.net)"
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: before
+          in: query
+          description: Timestamp (ms) — pagina para mensagens anteriores
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Mensagens (mais nova primeiro)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/StoredMessage" }
+        "400":
+          description: Query chat ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    post:
+      tags: [Chats]
+      summary: Envia mensagem de texto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                number: { type: string, description: Número (alternativa a chatJid) }
+                chatJid: { type: string, description: JID completo (tem prioridade) }
+                text: { type: string }
+      responses:
+        "200":
+          description: Enviada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SentMessage" }
+        "400":
+          description: text ou destinatário ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha no envio
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/messages/media:
+    post:
+      tags: [Chats]
+      summary: Envia mídia (base64 ou URL)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [media]
+              properties:
+                number: { type: string }
+                chatJid: { type: string }
+                mediatype:
+                  type: string
+                  default: image
+                  enum: [image, video, audio, document, sticker]
+                media:
+                  type: string
+                  description: |
+                    base64 puro, data URI (`data:<mime>;base64,...`) ou URL
+                    `http(s)://...`. Máximo 64 MB.
+                caption: { type: string }
+                fileName: { type: string }
+                ptt:
+                  type: boolean
+                  description: "true = nota de voz (áudio vira OGG/Opus no servidor quando -api-key/ffmpeg disponíveis)"
+                gifPlayback: { type: boolean }
+                seconds:
+                  type: integer
+                  description: Duração em segundos para áudio/PTT
+      responses:
+        "200":
+          description: Enviada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SentMessage" }
+        "400":
+          description: media/destinatário ausente ou mediatype inválido
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha no envio/upload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/messages/contact:
+    post:
+      tags: [Chats]
+      summary: Envia um cartão de contato
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phone]
+              properties:
+                number: { type: string }
+                chatJid: { type: string }
+                name: { type: string }
+                phone: { type: string }
+      responses:
+        "200":
+          description: Enviado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SentMessage" }
+        "400":
+          description: Dados ausentes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Falha no envio
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Instância não pareada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/chats/read:
+    post:
+      tags: [Chats]
+      summary: Marca a conversa como lida
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chatJid]
+              properties:
+                chatJid: { type: string }
+      responses:
+        "200":
+          description: Marcada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+        "400":
+          description: chatJid ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/presence:
+    post:
+      tags: [Chats]
+      summary: Envia presença (digitando, gravando áudio, online/offline)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jid: { type: string, description: Contato alvo; vazio = presence da conta }
+                state:
+                  type: string
+                  description: '"recording" | "paused" | qualquer outro = digitando'
+      responses:
+        "200":
+          description: Presença enviada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/check-number:
+    post:
+      tags: [Chats]
+      summary: Verifica números registrados no WhatsApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                numbers:
+                  type: array
+                  items: { type: string }
+                number: { type: string, description: Um número (alternativa a numbers) }
+      responses:
+        "200":
+          description: Resultado por número
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  numbers:
+                    type: array
+                    items: { $ref: "#/components/schemas/NumberCheck" }
+        "400":
+          description: numbers ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{sid}/profile-picture:
+    post:
+      tags: [Chats]
+      summary: Foto de perfil de um contato
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jid]
+              properties:
+                jid: { type: string }
+      responses:
+        "200":
+          description: URL da foto ("" quando indisponível)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+        "400":
+          description: jid ausente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Instância inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/media/{sid}/{file}:
+    get:
+      tags: [Chats]
+      summary: Download de mídia recebida
+      parameters:
+        - $ref: "#/components/parameters/sid"
+        - name: file
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Arquivo de mídia
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404":
+          description: Arquivo inexistente ou nome inválido
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/events:
+    get:
+      tags: [Events]
+      summary: Eventos em tempo real do painel (SSE)
+      description: |
+        `text/event-stream` com keepalive `: ping` a cada 20 s. Eventos:
+        `session-list`, `auth-state`, `session-qr`, `message`, `message-status`,
+        `message-media`, `presence`, `chat-presence`, `call-status`,
+        `call-ended`, `call-list`, `incoming`, `incoming-claimed`.
+        Um snapshot inicial é enviado ao conectar.
+      parameters:
+        - $ref: "#/components/parameters/clientId"
+      responses:
+        "200":
+          description: 'Fluxo SSE (formato data: {json} seguido de linha em branco; keepalive com ": ping")'
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "500":
+          description: Streaming não suportado pelo handler
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+
+  # ==========================================================================
+  # EVOLUTION — API compatível com Evolution API v2 (chave obrigatória)
+  # ==========================================================================
+  /instance/create:
+    post:
+      tags: [Evolution]
+      summary: Cria uma instância (session) com nome próprio
+      security:
+        - apiKeyHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [instanceName]
+              properties:
+                instanceName: { type: string }
+                integration: { type: string }
+                webhook:
+                  $ref: "#/components/schemas/WebhookConfig"
+      responses:
+        "201":
+          description: Criada (hash.apikey devolve a chave usada)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance:
+                    type: object
+                    properties:
+                      instanceName: { type: string }
+                      status: { type: string, enum: [created] }
+                  hash:
+                    type: object
+                    properties:
+                      apikey: { type: string }
+                      instanceName: { type: string }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "409":
+          description: Instância já existe
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvoError" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /instance/fetchInstances:
+    get:
+      tags: [Evolution]
+      summary: Lista as instâncias
+      security:
+        - apiKeyHeader: []
+      responses:
+        "200":
+          description: Instâncias
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/InstanceListItem" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+
+  /instance/connect/{instance}:
+    get:
+      tags: [Evolution]
+      summary: Obtém o QR de pareamento (polling até conectar)
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: "QR (pairing=true, count=1) ou já conectado (pairing=false, count=0)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pairing: { type: boolean }
+                  code: { type: string, description: String QR (vazio se conectado) }
+                  base64: { type: string, description: data URL PNG (vazio se conectado) }
+                  count: { type: integer, description: "0 = conectado; 1 = aguardando scan" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+        "503":
+          description: QR ainda não pronto (repetir em instantes)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvoError" }
+
+  /instance/connectionState/{instance}:
+    get:
+      tags: [Evolution]
+      summary: Estado da conexão
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Estado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance:
+                    type: object
+                    properties:
+                      instanceName: { type: string }
+                      state: { type: string, enum: [open, close, connecting] }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+
+  /instance/logout/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Desconecta a instância (mantém para novo pareamento)
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Desconectada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance:
+                    type: object
+                    properties:
+                      instanceName: { type: string }
+                      status: { type: string, enum: [logout] }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /instance/reconnect/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Reconecta a instância
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Reconexão iniciada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance:
+                    type: object
+                    properties:
+                      instanceName: { type: string }
+                      status: { type: string, enum: [connecting] }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /instance/{instance}:
+    delete:
+      tags: [Evolution]
+      summary: Exclui a instância
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Excluída (status "deleted")
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance:
+                    type: object
+                    properties:
+                      instanceName: { type: string }
+                      status: { type: string, enum: [deleted] }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/sendText/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Envia texto
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, text]
+              properties:
+                number: { type: string }
+                text: { type: string }
+                textMessage:
+                  type: object
+                  description: Alternativa ao campo text
+                  properties:
+                    text: { type: string }
+                delay: { type: integer, description: Espera N ms antes de enviar }
+                linkPreview: { type: boolean }
+                mentionsEveryOne: { type: boolean }
+                mentioned:
+                  type: array
+                  items: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/sendMedia/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Envia mídia (base64 ou URL)
+      description: |
+        Com `mediatype: audio` e `ptt: true` o servidor converte o arquivo em
+        OGG/Opus (ffmpeg) para virar nota de voz reproduzível no Android.
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, media]
+              properties:
+                number: { type: string }
+                mediatype: { type: string, default: image, enum: [image, video, audio, document, sticker] }
+                media: { type: string, description: base64 ou URL http(s) }
+                caption: { type: string }
+                fileName: { type: string }
+                ptt: { type: boolean }
+                gifPlayback: { type: boolean }
+                delay: { type: integer }
+                seconds: { type: integer }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/react/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Reage a uma mensagem
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, reaction]
+              properties:
+                number: { type: string }
+                reaction: { type: string, example: "👍" }
+                key: { $ref: "#/components/schemas/MessageKey" }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/delete/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Apaga uma mensagem
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                number: { type: string }
+                onlyForMe:
+                  type: boolean
+                  description: Só para mensagens enviadas por você (400 em recebidas)
+                key: { $ref: "#/components/schemas/MessageKey" }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/edit/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Edita uma mensagem enviada
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, messageId, text]
+              properties:
+                number: { type: string }
+                messageId: { type: string }
+                text: { type: string }
+                key:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    remoteJid: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /message/sendStatus/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Publica um status (status@broadcast)
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contentType: { type: string, description: Ignorado }
+                text: { type: string }
+                mediatype: { type: string, description: '"text" é normalizado para "image"' }
+                media: { type: string }
+                caption: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /chat/WhatsAppNumbers/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Verifica vários números de uma vez
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [numbers]
+              properties:
+                numbers:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Resultado por número
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/NumberCheck" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /chat/checkIsRegisteredUser/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Verifica um número
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string }
+      responses:
+        "200":
+          description: Resultado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists: { type: boolean }
+                  number: { type: string }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /chat/fetchProfilePictureUrl/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Foto de perfil
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                number: { type: string }
+                jid: { type: string, description: Tem prioridade sobre number }
+      responses:
+        "200":
+          description: URL ("" quando indisponível)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+
+  /chat/sendPresence/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Envia presença (corpo aceito mas interpretado pelos valores fixos)
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                number: { type: string }
+                presence: { type: string, description: '"recording" | "paused" | outro = digitando' }
+      responses:
+        "200":
+          description: Presença enviada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  presence: { type: string, enum: [sent] }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+
+  /chat/readMessages/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Marca mensagens como lidas
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [readMessages]
+              properties:
+                readMessages:
+                  type: array
+                  items: { $ref: "#/components/schemas/MessageKey" }
+      responses:
+        "200":
+          description: Quantidade marcada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  read: { type: integer }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+
+  /group/create/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Cria um grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject]
+              properties:
+                subject: { type: string }
+                participants:
+                  type: array
+                  items: { type: string }
+      responses:
+        "201":
+          description: Grupo criado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  creator: { type: string }
+                  id: { type: string }
+                  subject: { type: string }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/all/{instance}:
+    get:
+      tags: [Evolution]
+      summary: Lista grupos
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Grupos
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/GroupInfo" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/inviteCode/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Gera código de convite
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string, description: JID do grupo }
+      responses:
+        "200": { $ref: "#/components/responses/EvoInvite" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/revokeInviteCode/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Revoga o código de convite
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string, description: JID do grupo }
+      responses:
+        "200": { $ref: "#/components/responses/EvoInvite" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/join/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Entra em um grupo pelo convite
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inviteCode]
+              properties:
+                inviteCode: { type: string, description: Código ou URL completa do convite }
+      responses:
+        "200":
+          description: Entrou
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [success] }
+                  group: { type: string }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/leave/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Sai do grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string, description: JID do grupo }
+      responses:
+        "200":
+          description: Saiu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [success] }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/participants/{instance}/{group}:
+    get:
+      tags: [Evolution]
+      summary: Participantes de um grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+        - name: group
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Grupo com participantes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupInfo" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/participants/add/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Adiciona participantes
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupParticipantsReq" }
+      responses:
+        "200": { $ref: "#/components/responses/EvoParticipants" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/participants/remove/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Remove participantes
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupParticipantsReq" }
+      responses:
+        "200": { $ref: "#/components/responses/EvoParticipants" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/participants/promote/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Promove participantes a admin
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupParticipantsReq" }
+      responses:
+        "200": { $ref: "#/components/responses/EvoParticipants" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/participants/demote/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Rebaixa admins
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupParticipantsReq" }
+      responses:
+        "200": { $ref: "#/components/responses/EvoParticipants" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/updateSubject/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Muda o nome do grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, subject]
+              properties:
+                number: { type: string, description: JID do grupo }
+                subject: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/EvoStatusOk" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/updateDescription/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Muda a descrição do grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              properties:
+                number: { type: string, description: JID do grupo }
+                description: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/EvoStatusOk" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /group/sendMessage/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Envia texto para um grupo
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, text]
+              properties:
+                number: { type: string, description: JID do grupo }
+                text: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/EvoMessage" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /webhook/set/{instance}:
+    post:
+      tags: [Evolution]
+      summary: Configura o webhook da instância
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [webhook]
+              properties:
+                webhook: { $ref: "#/components/schemas/WebhookConfig" }
+      responses:
+        "200":
+          description: Configuração salva
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+        "400": { $ref: "#/components/responses/EvoBadRequest" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+  /webhook/find/{instance}:
+    get:
+      tags: [Evolution]
+      summary: Consulta o webhook da instância
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: "#/components/parameters/instance"
+      responses:
+        "200":
+          description: Configuração atual (objeto vazio quando não há)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEnvelope" }
+        "403": { $ref: "#/components/responses/EvoInvalidKey" }
+        "404": { $ref: "#/components/responses/EvoNotFound" }
+        "500": { $ref: "#/components/responses/EvoInternal" }
+
+components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: apikey
+      description: |
+        Chave única do servidor (flag `-api-key`), exigida em `/api/crm/*` e
+        nas rotas Evolution. `Authorization: Bearer <chave>` também é aceito.
+    userIdHeader:
+      type: apiKey
+      in: header
+      name: X-User-Id
+      description: |
+        Identidade do colaborador. Define de quem é cada lead e cada ligação,
+        e filtra os eventos do SSE.
+
+  parameters:
+    sid:
+      name: sid
+      in: path
+      required: true
+      schema: { type: string }
+      description: ID da instância (session)
+    phone:
+      name: phone
+      in: path
+      required: true
+      schema: { type: string }
+      description: Número do lead (dígitos com 55; pontuação e + são ignorados)
+    clientId:
+      name: X-Client-Id
+      in: header
+      required: false
+      schema: { type: string }
+      description: |
+        Identidade do operador no painel (também aceito como query `clientId`).
+        Usada para limite de "uma ligação por operador" e dono das ligações.
+    instance:
+      name: instance
+      in: path
+      required: true
+      schema: { type: string }
+      description: Nome da instância (é o ID da session no painel)
+
+  responses:
+    InvalidKey:
+      description: Chave inválida ou ausente (403)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    MissingUser:
+      description: Header X-User-Id ausente (400)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Disabled:
+      description: "API desabilitada — iniciar o servidor com -api-key (503)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    # --- Evolution -----------------------------------------------------------
+    EvoInvalidKey:
+      description: Chave inválida ou ausente (403)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EvoError" }
+    EvoBadRequest:
+      description: Body inválido ou dados ausentes (400)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EvoError" }
+    EvoNotFound:
+      description: Instância não encontrada (404)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EvoError" }
+    EvoInternal:
+      description: Erro interno (500)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EvoError" }
+    EvoStatusOk:
+      description: Operação concluída
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [success] }
+    EvoMessage:
+      description: Mensagem aceita para envio (201)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EvoMessageResponse" }
+    EvoInvite:
+      description: Código de convite
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              inviteCode: { type: string }
+              inviteUrl: { type: string }
+    EvoParticipants:
+      description: Participantes resultantes
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              participants:
+                type: array
+                items: { $ref: "#/components/schemas/GroupParticipant" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Mensagem legível do problema
+    SentMessage:
+      type: object
+      properties:
+        id: { type: string, description: ID da mensagem no WhatsApp }
+        timestamp: { type: integer, format: int64, description: Epoch ms }
+    NumberCheck:
+      type: object
+      properties:
+        exists: { type: boolean }
+        jid: { type: string }
+        number: { type: string }
+        name: { type: string, description: Nome verificado (quando disponível) }
+
+    # --- Evolution -----------------------------------------------------------
+    EvoError:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: "BAD_REQUEST | FORBIDDEN | NOT_FOUND | CONFLICT | INTERNAL | SERVICE_UNAVAILABLE"
+            message: { type: string }
+    EvoMessageResponse:
+      type: object
+      properties:
+        key:
+          type: object
+          properties:
+            remoteJid: { type: string }
+            fromMe: { type: boolean, enum: [true] }
+            id: { type: string }
+        messageTimestamp:
+          type: string
+          description: Segundos Unix como string
+        status:
+          type: string
+          enum: [PENDING]
+    InstanceListItem:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        instanceName: { type: string, description: Igual ao id }
+        state: { type: string }
+        integration: { type: string, enum: [whatsmeow] }
+        number: { type: string }
+        owner: { type: string, description: JID da conta }
+        profileName: { type: string }
+        totalChat: { type: integer }
+        totalChatWithoutMessage: { type: integer }
+    MessageKey:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        remoteJid: { type: string }
+        fromMe: { type: boolean }
+        participant: { type: string }
+    GroupParticipant:
+      type: object
+      properties:
+        id: { type: string }
+        admin: { type: string, enum: [superadmin, admin, ""] }
+        isAdmin: { type: boolean }
+        isSuper: { type: boolean }
+    GroupInfo:
+      type: object
+      properties:
+        id: { type: string }
+        subject: { type: string }
+        owner: { type: string }
+        size: { type: integer }
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/GroupParticipant" }
+    GroupParticipantsReq:
+      type: object
+      required: [participants]
+      properties:
+        groupJid: { type: string, description: JID do grupo (ou use number) }
+        number: { type: string, description: JID do grupo (alternativa) }
+        participants:
+          type: array
+          items: { type: string }
+    WebhookConfig:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        url: { type: string }
+        webhookByEvents: { type: boolean }
+        events:
+          type: array
+          items: { type: string }
+    WebhookEnvelope:
+      type: object
+      properties:
+        webhooks:
+          oneOf:
+            - $ref: "#/components/schemas/WebhookConfig"
+            - type: object
+              description: Objeto vazio quando não há webhook configurado
+    SessionInfo:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        jid:
+          type: string
+          description: JID da conta pareada ("" quando não pareada)
+        state:
+          type: string
+          description: "Estados: connecting, open, qr, logged_out, ..."
+        paired: { type: boolean }
+    PairingState:
+      type: object
+      properties:
+        state: { type: string }
+        paired: { type: boolean }
+        qr:
+          type: string
+          description: String QR do WhatsApp (presente enquanto não pareada)
+        qrBase64:
+          type: string
+          description: data URL PNG pronta para exibir em <img>
+    Lead:
+      type: object
+      properties:
+        phone:
+          type: string
+          description: Número normalizado com DDI 55
+          example: "5541991235566"
+        name: { type: string }
+        owner:
+          type: string
+          description: X-User-Id do colaborador que assumiu (dono fixo)
+        sessionId:
+          type: string
+          description: Instância usada para falar com este lead
+        createdAt:
+          type: integer
+          format: int64
+    StoredMessage:
+      type: object
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        chatJid:
+          type: string
+          example: "5541991235566@s.whatsapp.net"
+        senderJid: { type: string }
+        fromMe: { type: boolean }
+        type:
+          type: string
+          description: "text, ptt, audio, image, video, document, sticker, call_recording, ..."
+        text: { type: string }
+        fileName: { type: string }
+        mimeType: { type: string }
+        mediaUrl:
+          type: string
+          description: Caminho relativo do mídia baixado (/api/media/...)
+        status:
+          type: string
+          description: "PENDING, DELIVERED, READ, PLAYED, INTERNAL"
+        timestamp:
+          type: integer
+          format: int64
+        pushName: { type: string }
+    LiveCall:
+      type: object
+      description: Ligação ativa (broker em memória)
+      properties:
+        sessionId: { type: string }
+        callId: { type: string }
+        owner:
+          type: string
+          nullable: true
+        direction: { type: string, enum: [outbound, inbound] }
+        peer: { type: string, example: "5541991235566@s.whatsapp.net" }
+        startedAt: { type: integer, format: int64 }
+        status:
+          type: string
+          enum: [starting, ringing, connected, ended]
+        endedAt: { type: integer, format: int64 }
+        endReason: { type: string }
+    CallLog:
+      type: object
+      description: Registro persistido de uma ligação (histórico)
+      properties:
+        sessionId: { type: string }
+        callId: { type: string }
+        direction: { type: string, enum: [outbound, inbound] }
+        peer: { type: string }
+        owner: { type: string }
+        startedAt: { type: integer, format: int64 }
+        endedAt: { type: integer, format: int64 }
+        durationMs: { type: integer, format: int64 }
+        recordingMs: { type: integer, format: int64 }
+        endReason:
+          type: string
+          description: "user_ended, timeout, enc, busy, failed, declined, ..."
+        recordingUrl:
+          type: string
+          description: Gravação (relativa; prefixar com a base URL) — somente quando houve gravação
+    ChatSummary:
+      type: object
+      properties:
+        sessionId: { type: string }
+        jid: { type: string }
+        name: { type: string }
+        isGroup: { type: boolean }
+        unread: { type: integer }
+        lastText: { type: string }
+        lastType: { type: string }
+        lastFromMe: { type: boolean }
+        lastAt: { type: integer, format: int64 }

@@ -23,6 +23,7 @@ type SessionManager struct {
 	waLogger  waLog.Logger
 	log       *slog.Logger
 	maxCalls  int
+	recDir    string
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -78,7 +79,7 @@ func (m *SessionManager) ByInstance(name string) (*Session, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, s := range m.sessions {
-		if s.name == name {
+		if s.info().Name == name {
 			return s, true
 		}
 	}
@@ -102,7 +103,64 @@ func (m *SessionManager) infos() []SessionInfo {
 }
 
 func (m *SessionManager) snapshotEvents() []any {
-	return []any{map[string]any{"type": "session-list", "sessions": m.infos()}}
+	evs := []any{map[string]any{"type": "session-list", "sessions": m.infos()}}
+	m.mu.RLock()
+	for _, id := range m.order {
+		s, ok := m.sessions[id]
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		a := s.auth
+		s.mu.Unlock()
+		if a.QR != "" && !a.Paired {
+			evs = append(evs, map[string]any{
+				"type": "auth-state", "sessionId": id,
+				"paired": false, "state": a.State, "qr": a.QR,
+			})
+		}
+	}
+	m.mu.RUnlock()
+	return evs
+}
+
+// mergeDuplicateLIDChats folds any chat still keyed by a hidden LID into its
+// phone-number twin, so a person who messaged under both addressing modes
+// shows up as one chat instead of two. Runs at startup per session.
+func (m *SessionManager) mergeDuplicateLIDChats(ctx context.Context, sessionID string) {
+	lids, err := m.msgs.listLIDChats(ctx, sessionID)
+	if err != nil {
+		m.log.Warn("list lid chats failed", "session", sessionID, "err", err)
+		return
+	}
+	for _, lidStr := range lids {
+		lid, err := types.ParseJID(lidStr)
+		if err != nil || lid.Server != types.HiddenUserServer {
+			continue
+		}
+		pn, err := m.container.LIDMap.GetPNForLID(ctx, lid)
+		if err != nil || pn.User == "" {
+			m.log.Debug("no phone mapping for lid chat", "session", sessionID, "jid", lidStr)
+			continue
+		}
+		if err := m.msgs.mergeLIDChat(ctx, sessionID, lidStr, pn.ToNonAD().String()); err != nil {
+			m.log.Warn("merge lid chat failed", "session", sessionID, "jid", lidStr, "err", err)
+			continue
+		}
+		m.log.Info("merged lid chat into phone chat", "session", sessionID, "lid", lidStr, "phone", pn.User)
+
+		// A LID leaked into chat_jid as if it were a phone number (a call placed
+		// from a LID chat did that) leaves a third, bogus chat behind: fold it in
+		// as well, since its user part is the very LID resolved above.
+		bogus := lid.User + "@" + types.DefaultUserServer
+		if exists, err := m.msgs.hasChat(ctx, sessionID, bogus); err == nil && exists {
+			if err := m.msgs.mergeLIDChat(ctx, sessionID, bogus, pn.ToNonAD().String()); err != nil {
+				m.log.Warn("merge bogus number chat failed", "session", sessionID, "jid", bogus, "err", err)
+				continue
+			}
+			m.log.Info("merged lid-as-number chat into phone chat", "session", sessionID, "jid", bogus, "phone", pn.User)
+		}
+	}
 }
 
 func (m *SessionManager) Restore(ctx context.Context) error {
@@ -133,6 +191,7 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 		if err := s.connect(ctx); err != nil {
 			m.log.Error("session connect failed", "session", row.ID, "err", err)
 		}
+		m.mergeDuplicateLIDChats(ctx, row.ID)
 	}
 	m.broker.emitSessionList(m.infos())
 	m.log.Info("sessions restored", "count", len(m.infos()))
@@ -182,6 +241,24 @@ func (m *SessionManager) Delete(ctx context.Context, id string) error {
 	_ = m.store.delete(ctx, id)
 	m.broker.emitSessionList(m.infos())
 	m.log.Info("session deleted", "session", id)
+	return nil
+}
+
+// Rename changes the display name of a session (instance) in memory, in the
+// database and on every connected panel through the session list event.
+func (m *SessionManager) Rename(ctx context.Context, id, name string) error {
+	s, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("no session %s", id)
+	}
+	if err := m.store.setName(ctx, id, name); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.name = name
+	s.mu.Unlock()
+	m.broker.emitSessionList(m.infos())
+	m.log.Info("session renamed", "session", id, "name", name)
 	return nil
 }
 

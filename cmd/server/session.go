@@ -29,6 +29,13 @@ type Session struct {
 	client *whatsmeow.Client
 	reg    *callRegistry
 
+	recMu sync.Mutex
+	recs  map[string]*callRecorder
+
+	// Throttle for the peer-audio debug line (see notePeerAudio).
+	peerAudioMu   sync.Mutex
+	peerAudioLast map[string]time.Time
+
 	mu   sync.Mutex
 	auth AuthSnapshot
 }
@@ -42,6 +49,8 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 		client: client,
 		auth:   AuthSnapshot{State: "connecting"},
 		reg:    newCallRegistry(),
+		recs:   map[string]*callRecorder{},
+		peerAudioLast: map[string]time.Time{},
 	}
 	client.AddEventHandler(s.handleEvent)
 	return s
@@ -88,19 +97,41 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
+		s.recorderFor(callID).write(1, pcm16)
 		ac, ok := s.reg.get(callID)
 		if !ok || ac.bridge == nil {
+			s.notePeerAudio(callID, false)
 			return
 		}
+		s.notePeerAudio(callID, true)
 		_ = ac.bridge.WritePCM(pcm16)
 	}
 }
 
-func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo bool) (string, error) {
+// notePeerAudio throttles a debug line stating whether decoded peer frames
+// reached the browser bridge or were dropped because no bridge was attached —
+// the difference between "I cannot hear the contact" and a working call.
+func (s *Session) notePeerAudio(callID string, forwarded bool) {
+	now := time.Now()
+	s.peerAudioMu.Lock()
+	if now.Sub(s.peerAudioLast[callID]) < 5*time.Second {
+		s.peerAudioMu.Unlock()
+		return
+	}
+	s.peerAudioLast[callID] = now
+	s.peerAudioMu.Unlock()
+	s.log.Debug("peer audio toward browser", "call_id", callID, "forwarded", forwarded)
+}
+
+func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo, record bool) (string, error) {
 	callID := signaling.GenerateCallID()
 	cm := s.createCall(callID)
+	if record {
+		s.startRecording(callID, CallRecord{Direction: "outbound", Peer: peer.String(), StartedAt: time.Now().UnixMilli()})
+	}
 	if err := cm.StartCall(ctx, callID, peer, isVideo); err != nil {
 		s.removeCall(callID)
+		s.finalizeRecording(callID, CallRecord{}, "failed")
 		return "", err
 	}
 	return callID, nil
@@ -125,6 +156,7 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		return
 	}
 	cm := s.createCall(callID)
+	s.startRecording(callID, CallRecord{Direction: "inbound", Peer: evt.From.String(), StartedAt: time.Now().UnixMilli()})
 	cm.HandleCallOffer(ctx, node, evt.From)
 }
 
@@ -237,12 +269,13 @@ func (s *Session) setAuth(a AuthSnapshot) {
 func (s *Session) info() SessionInfo {
 	s.mu.Lock()
 	a := s.auth
+	name := s.name
 	s.mu.Unlock()
 	jid := ""
 	if id := s.client.Store.ID; id != nil {
 		jid = id.String()
 	}
-	return SessionInfo{ID: s.id, Name: s.name, JID: jid, State: a.State, Paired: a.Paired || jid != ""}
+	return SessionInfo{ID: s.id, Name: name, JID: jid, State: a.State, Paired: a.Paired || jid != ""}
 }
 
 func (s *Session) setBridge(callID string, b *Bridge) {
@@ -280,6 +313,20 @@ func (s *Session) teardownAllCalls() {
 		if ac.bridge != nil {
 			ac.bridge.Close()
 		}
+	}
+	s.recMu.Lock()
+	ids := make([]string, 0, len(s.recs))
+	for id := range s.recs {
+		ids = append(ids, id)
+	}
+	s.recMu.Unlock()
+	for _, id := range ids {
+		info, _ := s.mgr.broker.getCall(id)
+		rec := CallRecord{}
+		if info != nil {
+			rec = *info
+		}
+		s.finalizeRecording(id, rec, string(core.EndCallReasonUserEnded))
 	}
 }
 

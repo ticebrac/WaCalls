@@ -197,17 +197,45 @@ func (m *CallManager) HandleCallTransport(ctx context.Context, node *waBinary.No
 	}
 }
 
+// failCurrentCall tears the outgoing call down when the signaling handshake
+// cannot continue. Without it the call stayed in ringing forever and the UI
+// kept showing "Calling…" with nothing ever dialled.
+func (m *CallManager) failCurrentCall(reason string) {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || call.IsEnded() {
+		m.mu.Unlock()
+		return
+	}
+	m.log.Error("outgoing call failed", "call_id", call.CallID, "peer", call.PeerJid, "reason", reason)
+	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonFailed})
+	ended := call
+	m.emitState()
+	m.mu.Unlock()
+
+	if m.OnEnded != nil {
+		m.OnEnded(ended)
+	}
+	m.cleanupMedia()
+}
+
 func (m *CallManager) HandleCallAck(ctx context.Context, node *waBinary.Node) {
 	if t := wanode.AttrString(node.Attrs, "type"); t != "offer" {
 		return
 	}
 	if e := wanode.AttrString(node.Attrs, "error"); e != "" {
-		m.log.Error("offer ack error", "error", e)
+		m.log.Error("WhatsApp rejected the call offer",
+			"error", e, "call_id", wanode.AttrString(node.Attrs, "call-id"),
+			"ack", node.String())
+		m.failCurrentCall("WhatsApp rejected the call offer (error " + e + ")")
 		return
 	}
 	parsed := signaling.ParseRelayFromAck(node)
 	m.log.Info("offer ack received", "relays", len(parsed.Relays), "participants", len(parsed.ParticipantJids))
 	if len(parsed.Relays) == 0 {
+		// Without relays no media path can ever be built and no further ack is
+		// coming, so leaving the call in ringing would hang the UI forever.
+		m.failCurrentCall("offer ack carried no relays (ack children: " + signaling.ChildTags(wanode.NodeChildren(node)) + ")")
 		return
 	}
 

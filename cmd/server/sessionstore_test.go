@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -10,7 +9,7 @@ import (
 func TestSessionStoreRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "sessions_test.db")
-	db, err := sql.Open("sqlite", "file:"+dbPath)
+	db, err := openDatabase(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

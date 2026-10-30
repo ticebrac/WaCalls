@@ -5,6 +5,7 @@ run-mlow.ps1
 *.exe
 *.test
 *.out
+*.log
 /dist/
 /bin/
 wacalls.db
@@ -36,3 +37,6 @@ Thumbs.db
 *~
 !native/
 !native/*.dll
+.crm-api-key
+/backup/
+.opencode/

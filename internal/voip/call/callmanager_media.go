@@ -107,26 +107,22 @@ func (m *CallManager) startSilenceKeepaliveLocked() {
 }
 
 func (m *CallManager) onRelayData(data []byte) {
-	if transport.IsStunPacket(data) {
-		return
-	}
-	if !transport.IsRtpPacket(data) {
-		return
-	}
-	if len(data) < 12 {
-		return
-	}
-	pt := data[1] & 0x7f
-	if pt != core.PayloadTypeWhatsAppOpus {
-		return
-	}
-
-	m.mu.Lock()
-	if m.srtpSession == nil || m.codec == nil {
+	if transport.IsStunPacket(data) || !transport.IsRtpPacket(data) || len(data) < 12 || data[1]&0x7f != core.PayloadTypeWhatsAppOpus {
+		m.mu.Lock()
+		m.rtpDrop++
 		m.mu.Unlock()
 		return
 	}
 	ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
+
+	m.mu.Lock()
+	m.rtpRecv++
+	if m.srtpSession == nil || m.codec == nil {
+		m.rtpDrop++
+		m.noteRtpLocked()
+		m.mu.Unlock()
+		return
+	}
 	if ssrc == m.selfSsrc {
 		m.mu.Unlock()
 		return
@@ -137,6 +133,7 @@ func (m *CallManager) onRelayData(data []byte) {
 			m.peerSsrcs = []uint32{ssrc}
 			m.relay.SetSubscriptionSsrc(ssrc)
 			go m.relay.ResendSubscriptions()
+			m.log.Info("peer rtp ssrc corrected", "ssrc", ssrc)
 		}
 	}
 	srtp := m.srtpSession
@@ -145,6 +142,10 @@ func (m *CallManager) onRelayData(data []byte) {
 
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
+		m.mu.Lock()
+		m.rtpUnprot++
+		m.noteRtpLocked()
+		m.mu.Unlock()
 		m.log.Debug("srtp unprotect error", "err", err)
 		return
 	}
@@ -153,10 +154,30 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	pcm, err := codec.Decode(pkt.Payload)
 	if err != nil {
+		m.mu.Lock()
+		m.rtpDrop++
+		m.noteRtpLocked()
+		m.mu.Unlock()
 		return
 	}
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
+	m.mu.Lock()
+	m.rtpDecoded++
+	m.noteRtpLocked()
+	m.mu.Unlock()
 	if m.OnPeerAudio != nil {
 		m.OnPeerAudio(pcm)
 	}
+}
+
+// noteRtpLocked logs the incoming-RTP tally a few times per call so a silent
+// receive path can be told apart from a broken one.
+func (m *CallManager) noteRtpLocked() {
+	if time.Since(m.rtpLastLog) < 5*time.Second {
+		return
+	}
+	m.rtpLastLog = time.Now()
+	m.log.Debug("peer rtp",
+		"recv", m.rtpRecv, "drop", m.rtpDrop, "unprot_err", m.rtpUnprot,
+		"decoded", m.rtpDecoded, "sub_ssrc", firstSsrc(m.peerSsrcs), "self_ssrc", m.selfSsrc)
 }

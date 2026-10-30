@@ -52,9 +52,15 @@ func extractMessageContent(msg *waE2E.Message) extractedMessage {
 	case msg.GetLocationMessage() != nil:
 		return extractedMessage{Type: "location"}
 	case msg.GetContactMessage() != nil:
-		return extractedMessage{Type: "contact"}
+		m := msg.GetContactMessage()
+		return contactContent(m.GetDisplayName(), m.GetVcard())
 	case msg.GetContactsArrayMessage() != nil:
-		return extractedMessage{Type: "contact_array"}
+		m := msg.GetContactsArrayMessage()
+		if len(m.GetContacts()) == 0 {
+			return extractedMessage{Type: "contact"}
+		}
+		first := m.GetContacts()[0]
+		return contactContent(first.GetDisplayName(), first.GetVcard())
 	case msg.GetReactionMessage() != nil:
 		return extractedMessage{Type: "reaction", Text: msg.GetReactionMessage().GetText()}
 	case msg.GetProtocolMessage() != nil:
@@ -101,11 +107,12 @@ func (s *Session) handleMessageEvent(evt *events.Message) {
 	}
 	ctx := context.Background()
 	content := extractMessageContent(evt.Message)
+	chatJID := s.canonicalChatJID(ctx, evt.Info.MessageSource)
 	stored := &StoredMessage{
 		ID:        evt.Info.ID,
 		SessionID: s.id,
-		ChatJID:   evt.Info.Chat.String(),
-		SenderJID: evt.Info.Sender.String(),
+		ChatJID:   chatJID.String(),
+		SenderJID: s.canonicalPeer(ctx, evt.Info.Sender).String(),
 		FromMe:    evt.Info.IsFromMe,
 		Type:      content.Type,
 		Text:      content.Text,
@@ -240,7 +247,7 @@ func (s *Session) sendTextMessage(ctx context.Context, peer types.JID, text stri
 	return &resp, nil
 }
 
-func (s *Session) sendMediaMessage(ctx context.Context, peer types.JID, mediatype, mediaInput, caption, fileName string, ptt, gifPlayback bool) (*whatsmeow.SendResponse, error) {
+func (s *Session) sendMediaMessage(ctx context.Context, peer types.JID, mediatype, mediaInput, caption, fileName string, ptt, gifPlayback bool, seconds uint32) (*whatsmeow.SendResponse, error) {
 	data, mime, err := decodeMediaInput(mediaInput)
 	if err != nil {
 		return nil, err
@@ -266,6 +273,17 @@ func (s *Session) sendMediaMessage(ctx context.Context, peer types.JID, mediatyp
 	if mime == "" {
 		mime = defaultMimeForType(mediatype)
 	}
+	if ptt {
+		// A voice note only plays from OGG/Opus; anything else reaches the
+		// contact as a bubble that fails on playback.
+		converted, convertedMime, convErr := voiceNoteAudio(ctx, data, mime)
+		if convErr != nil {
+			s.log.Warn("voice note conversion failed; sending as plain audio", "mime", mime, "err", convErr)
+			ptt = false
+		} else {
+			data, mime = converted, convertedMime
+		}
+	}
 	up, err := s.client.Upload(ctx, data, mt)
 	if err != nil {
 		return nil, err
@@ -289,11 +307,16 @@ func (s *Session) sendMediaMessage(ctx context.Context, peer types.JID, mediatyp
 			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(fileLen),
 		}
 	case "audio":
-		msg.AudioMessage = &waE2E.AudioMessage{
+		audio := &waE2E.AudioMessage{
 			Mimetype: proto.String(mime), PTT: proto.Bool(ptt),
 			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath), MediaKey: up.MediaKey,
 			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(fileLen),
 		}
+		// Without the duration WhatsApp renders the voice note as 0:00.
+		if seconds > 0 {
+			audio.Seconds = proto.Uint32(seconds)
+		}
+		msg.AudioMessage = audio
 	case "document":
 		if fileName == "" {
 			fileName = "document." + extForMime(mime)
@@ -318,7 +341,11 @@ func (s *Session) sendMediaMessage(ctx context.Context, peer types.JID, mediatyp
 	if text == "" {
 		text = "[" + mediatype + "]"
 	}
-	s.recordOutgoingMedia(ctx, peer, &resp, mediatype, text, fileName, mime, data)
+	msgType := mediatype
+	if ptt {
+		msgType = "ptt"
+	}
+	s.recordOutgoingMedia(ctx, peer, &resp, msgType, text, fileName, mime, data)
 	return &resp, nil
 }
 

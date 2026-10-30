@@ -13,8 +13,8 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address")
-	dbPath := flag.String("db", "wacalls.db", "SQLite session database path")
+	addr := flag.String("addr", ":11000", "HTTP listen address")
+	dbTarget := flag.String("db", "wacalls.db", "database target: SQLite file path or postgres:// DSN")
 	staticDir := flag.String("static", "client/dist", "static client directory (optional)")
 	debug := flag.Bool("debug", false, "verbose logging")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
@@ -32,7 +32,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *dataDir, *apiKey, *maxCalls, log)
+	srv, err := newServer(ctx, *dbTarget, *staticDir, *dataDir, *apiKey, *maxCalls, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)

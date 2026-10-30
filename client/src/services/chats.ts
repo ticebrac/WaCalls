@@ -23,8 +23,25 @@ export const sendMedia = async (
   media: string,
   caption: string,
   fileName?: string,
+  opts?: { ptt?: boolean; seconds?: number },
 ): Promise<SendMediaResult> =>
-  apiPost<SendMediaResult>(`/api/sessions/${sid}/messages/media`, { chatJid, mediatype, media, caption, fileName });
+  apiPost<SendMediaResult>(`/api/sessions/${sid}/messages/media`, {
+    chatJid,
+    mediatype,
+    media,
+    caption,
+    fileName,
+    ptt: opts?.ptt ?? false,
+    seconds: opts?.seconds ?? 0,
+  });
+
+export const sendContact = async (
+  sid: string,
+  chatJid: string,
+  name: string,
+  phone: string,
+): Promise<SendTextResult> =>
+  apiPost<SendTextResult>(`/api/sessions/${sid}/messages/contact`, { chatJid, name, phone });
 
 export const markChatRead = async (sid: string, chatJid: string): Promise<void> => {
   await apiPost(`/api/sessions/${sid}/chats/read`, { chatJid });

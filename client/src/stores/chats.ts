@@ -24,6 +24,10 @@ export const refreshChats = async (sid: string): Promise<void> => {
 export const loadMessages = async (sid: string, chat: string): Promise<void> => {
   try {
     const msgs = await listMessages(sid, chat);
+    // The API answers newest-first, but the thread renders top-down and anchors
+    // its scroll at the bottom, so oldest must come first here — the same order
+    // the live "message" handler below settles on.
+    msgs.sort((a, b) => a.timestamp - b.timestamp);
     useChats.setState((s) => ({ messages: { ...s.messages, [chat]: msgs } }));
   } catch {}
 };

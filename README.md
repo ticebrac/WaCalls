@@ -148,13 +148,13 @@ cd client && npm install && cd ..
 ### Run
 
 ```bash
-go run ./cmd/server -addr :8080          # add -debug for verbose logs
+go run ./cmd/server -addr :11000          # add -debug for verbose logs
 ```
 
 Live audio works out of the box — the MLow codec is pure Go, so a plain build
 includes it. No build tags, no `CGO_ENABLED`, no DLLs.
 
-Open `http://localhost:8080`, click **New session**, and scan the QR shown in the browser
+Open `http://localhost:11000`, click **New session**, and scan the QR shown in the browser
 (it is also printed in the terminal) with **WhatsApp → Linked devices**. Add more accounts
 the same way and switch between them in the sidebar.
 
@@ -162,21 +162,21 @@ the same way and switch between them in the sidebar.
 
 ```bash
 cd client
-npm run dev      # Vite on :5173, proxies /api → http://localhost:8080
+npm run dev      # Vite on :10000, proxies /api → http://localhost:11000
 ```
 
 For production, build the static client and serve it from the Go server:
 
 ```bash
 cd client && npm run build && cd ..
-go run ./cmd/server -static client/dist -addr :8080
+go run ./cmd/server -static client/dist -addr :11000
 ```
 
 ### Server flags
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-addr` | `:8080` | HTTP listen address |
+| `-addr` | `:11000` | HTTP listen address |
 | `-db` | `wacalls.db` | SQLite session database path |
 | `-static` | `client/dist` | Static client directory (optional) |
 | `-debug` | `false` | Verbose logging (includes whatsmeow's internal log) |
@@ -194,7 +194,8 @@ originating `sessionId`.
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/sessions` | List accounts (id, name, jid, status, paired) |
-| `POST` | `/api/sessions` | Create an account and begin QR pairing |
+| `POST` | `/api/sessions` | Create an account (`{ name }`) and begin QR pairing |
+| `GET` | `/api/sessions/{sid}/qr` | Current QR (`{ state, paired, qr, qrBase64 }`) while pairing |
 | `DELETE` | `/api/sessions/{sid}` | Log out and remove an account |
 | `POST` | `/api/sessions/{sid}/logout` | Disconnect an account (keep it for re-pairing) |
 | `POST` | `/api/sessions/{sid}/pair` | Re-pair an account (emit a fresh QR) |
@@ -207,7 +208,10 @@ originating `sessionId`.
 | `POST` | `/api/sessions/{sid}/check-number` | Check if numbers are on WhatsApp |
 | `POST` | `/api/sessions/{sid}/profile-picture` | Fetch a profile picture URL |
 | `GET` | `/api/media/{sid}/{file}` | Cached media files |
-| `POST` | `/api/sessions/{sid}/calls` | Start an outgoing call (`{ phone, duration_ms?, record? }`) |
+| `POST` | `/api/sessions/{sid}/calls` | Start an outgoing call (`{ phone, record? }`; numbers without country code get `55`; recording on by default) |
+| `GET` | `/api/sessions/{sid}/calls?limit=&peer=` | Persisted call log for CRM (peer, operator, start/end, duration, end reason, `recordingUrl`) |
+| `GET` | `/api/sessions/{sid}/calls/{id}` | One call log entry |
+| `GET` | `/api/recordings/{sid}/{file}` | Stereo WAV of a call (left = operator mic, right = lead) |
 | `POST` | `/api/sessions/{sid}/calls/{id}/webrtc` | Exchange the browser WebRTC SDP |
 | `POST` | `/api/sessions/{sid}/calls/{id}/accept` | Accept an incoming call |
 | `POST` | `/api/sessions/{sid}/calls/{id}/reject` | Reject an incoming call |
@@ -230,20 +234,20 @@ Authentication uses the `apikey` header (or `Authorization: Bearer`) matched aga
 
 ```bash
 # create an instance (starts QR pairing)
-curl -X POST http://localhost:8080/instance/create \
+curl -X POST http://localhost:11000/instance/create \
   -H "Content-Type: application/json" -H "apikey: mykey" \
   -d '{"instanceName":"sales","webhook":{"enabled":true,"url":"https://my.app/hook"}}'
 
 # fetch the QR
-curl http://localhost:8080/instance/connect/sales -H "apikey: mykey"
+curl http://localhost:11000/instance/connect/sales -H "apikey: mykey"
 
 # send a text message
-curl -X POST http://localhost:8080/message/sendText/sales \
+curl -X POST http://localhost:11000/message/sendText/sales \
   -H "Content-Type: application/json" -H "apikey: mykey" \
   -d '{"number":"5511999999999","text":"Hello from WaCalls!"}'
 
 # send an image (base64 or URL)
-curl -X POST http://localhost:8080/message/sendMedia/sales \
+curl -X POST http://localhost:11000/message/sendMedia/sales \
   -H "Content-Type: application/json" -H "apikey: mykey" \
   -d '{"number":"5511999999999","mediatype":"image","media":"https://ex.com/pic.png","caption":"hi"}'
 ```

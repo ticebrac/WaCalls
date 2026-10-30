@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
+	"time"
 )
 
 type sessionRow struct {
@@ -13,13 +13,14 @@ type sessionRow struct {
 	JID  string
 }
 
-type sessionStore struct{ db *sql.DB }
+type sessionStore struct{ db *qDB }
 
-func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
+func newSessionStore(ctx context.Context, db *qDB) (*sessionStore, error) {
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sessions (
 		id   TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
-		jid  TEXT
+		jid  TEXT,
+		created_at BIGINT NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		return nil, err
@@ -34,7 +35,7 @@ func newSessionID() string {
 }
 
 func (s *sessionStore) list(ctx context.Context) ([]sessionRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, COALESCE(jid, '') FROM sessions ORDER BY rowid`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, COALESCE(jid, '') FROM sessions ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -51,12 +52,18 @@ func (s *sessionStore) list(ctx context.Context) ([]sessionRow, error) {
 }
 
 func (s *sessionStore) insert(ctx context.Context, id, name string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id, name, jid) VALUES (?, ?, NULL)`, id, name)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id, name, jid, created_at) VALUES (?, ?, NULL, ?)`,
+		id, name, time.Now().UnixMilli())
 	return err
 }
 
 func (s *sessionStore) setJID(ctx context.Context, id, jid string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET jid = ? WHERE id = ?`, jid, id)
+	return err
+}
+
+func (s *sessionStore) setName(ctx context.Context, id, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET name = ? WHERE id = ?`, name, id)
 	return err
 }
 

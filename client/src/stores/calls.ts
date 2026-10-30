@@ -36,6 +36,7 @@ export const ensureCallsWired = (): void => {
       useCalls.setState((s) => {
         const conn = s.ownConnections.get(ev.id);
         if (conn) conn.close();
+        detachPeerAudio(ev.id);
         const next = new Map(s.ownConnections);
         next.delete(ev.id);
         return {
@@ -55,7 +56,37 @@ export const ensureCallsWired = (): void => {
 
 export const isMine = (call: CallSummary): boolean => call.owner === getClientId();
 
+// Peer playback lives outside React: the card that used to own the <audio>
+// element mounts only on the Calls tab, so a call placed from a chat played
+// nothing for the operator even though the server was forwarding the audio.
+const peerAudio = new Map<string, HTMLAudioElement>();
+
+export const attachPeerAudio = (id: string, stream: MediaStream | null): void => {
+  if (!stream || typeof Audio === "undefined") return;
+  let el = peerAudio.get(id);
+  if (!el) {
+    el = new Audio();
+    el.autoplay = true;
+    peerAudio.set(id, el);
+  }
+  el.srcObject = stream;
+  void el.play().catch(() => {});
+};
+
+export const detachPeerAudio = (id: string): void => {
+  const el = peerAudio.get(id);
+  if (!el) return;
+  peerAudio.delete(id);
+  try {
+    el.pause();
+  } catch {}
+  el.srcObject = null;
+};
+
+export const getPeerAudio = (id: string): HTMLAudioElement | undefined => peerAudio.get(id);
+
 export const registerOwnConnection = (id: string, conn: OpenCall): void => {
+  attachPeerAudio(id, conn.remoteStream);
   useCalls.setState((s) => {
     const next = new Map(s.ownConnections);
     next.set(id, conn);

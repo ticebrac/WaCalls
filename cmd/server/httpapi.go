@@ -19,19 +19,24 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.handleSessionDelete)
+	mux.HandleFunc("GET /api/sessions/{sid}/qr", s.handleSessionQR)
 	mux.HandleFunc("POST /api/sessions/{sid}/logout", s.handleSessionLogout)
 	mux.HandleFunc("POST /api/sessions/{sid}/pair", s.handleSessionPair)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls", s.handleStartCall)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls", s.handleCallList)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/{id}", s.handleCallGet)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/webrtc", s.handleWebRTC)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/accept", s.handleAccept)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/reject", s.handleReject)
 	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}", s.handleEndCall)
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
+	mux.HandleFunc("GET /api/recordings/{sid}/{file}", s.handleRecording)
 
 	mux.HandleFunc("GET /api/sessions/{sid}/chats", s.handleChatList)
 	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.handleMessageList)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages", s.handleSendMessage)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/media", s.handleSendMedia)
+	mux.HandleFunc("POST /api/sessions/{sid}/messages/contact", s.handleSendContact)
 	mux.HandleFunc("POST /api/sessions/{sid}/chats/read", s.handleMarkRead)
 	mux.HandleFunc("POST /api/sessions/{sid}/presence", s.handleSetPresence)
 	mux.HandleFunc("POST /api/sessions/{sid}/check-number", s.handleCheckNumber)
@@ -39,6 +44,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/media/{sid}/{file}", s.handleMediaFile)
 
 	mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	s.crmRoutes(mux)
 
 	s.evoRoutes(mux)
 
@@ -53,8 +60,8 @@ func (s *server) routes() http.Handler {
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, X-User-Id, apikey, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -178,7 +185,7 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 	var body struct {
 		Phone      string `json:"phone"`
 		DurationMs int    `json:"duration_ms"`
-		Record     bool   `json:"record"`
+		Record     *bool  `json:"record"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Phone) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "phone required"})
@@ -193,9 +200,10 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max concurrent calls"})
 		return
 	}
-	peer := types.NewJID(normalizePhone(body.Phone), types.DefaultUserServer)
+	peer := sess.peerFromInput(r.Context(), body.Phone)
+	record := body.Record == nil || *body.Record
 
-	callID, err := sess.startOutgoing(r.Context(), peer, false)
+	callID, err := sess.startOutgoing(r.Context(), peer, false, record)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -228,6 +236,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	}
 
 	bridge.OnBrowserPCM = func(pcm []float32) {
+		sess.recorderFor(callID).write(0, pcm)
 		ac.cm.FeedCapturedPCM(pcm)
 	}
 	bridge.OnTerminalICE = func() {
@@ -291,6 +300,17 @@ func normalizePhone(p string) string {
 		}
 	}
 	return b.String()
+}
+
+// defaultCountryCode (Brazil) is prepended to numbers entered without a country code.
+// Brazilian numbers without it are 10 (landline) or 11 (mobile, with DDD) digits.
+const defaultCountryCode = "55"
+
+func withDefaultCountry(digits string) string {
+	if len(digits) <= 11 {
+		return defaultCountryCode + digits
+	}
+	return digits
 }
 
 func (s *server) handleChatList(w http.ResponseWriter, r *http.Request) {
@@ -362,7 +382,7 @@ func (s *server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "number or chatJid required"})
 		return
 	}
-	peer := chatJIDFromInput(target)
+	peer := sess.canonicalJIDFromInput(r.Context(), target)
 	resp, err := sess.sendTextMessage(r.Context(), peer, body.Text)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -389,6 +409,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request) {
 		FileName    string `json:"fileName"`
 		PTT         bool   `json:"ptt"`
 		GIFPlayback bool   `json:"gifPlayback"`
+		Seconds     uint32 `json:"seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Media == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "media required (base64)"})
@@ -405,8 +426,8 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request) {
 	if body.Mediatype == "" {
 		body.Mediatype = "image"
 	}
-	peer := chatJIDFromInput(target)
-	resp, err := sess.sendMediaMessage(r.Context(), peer, body.Mediatype, body.Media, body.Caption, body.FileName, body.PTT, body.GIFPlayback)
+	peer := sess.canonicalJIDFromInput(r.Context(), target)
+	resp, err := sess.sendMediaMessage(r.Context(), peer, body.Mediatype, body.Media, body.Caption, body.FileName, body.PTT, body.GIFPlayback, body.Seconds)
 	if err != nil {
 		if ee, ok := err.(*apiError); ok {
 			writeJSON(w, ee.status, map[string]string{"error": ee.message})
@@ -430,8 +451,8 @@ func (s *server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "chatJid required"})
 		return
 	}
-	chatJID := chatJIDFromInput(body.ChatJid)
-	msgs, err := s.sessions.msgs.messages(r.Context(), sess.id, body.ChatJid, 100, 0)
+	chatJID := sess.canonicalJIDFromInput(r.Context(), body.ChatJid)
+	msgs, err := s.sessions.msgs.messages(r.Context(), sess.id, chatJID.String(), 100, 0)
 	if err == nil {
 		var ids []string
 		senderCounts := map[string][]types.MessageID{}
@@ -447,7 +468,7 @@ func (s *server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 			sender, _ := types.ParseJID(senderStr)
 			_ = sess.client.MarkRead(r.Context(), mids, now, chatJID, sender)
 		}
-		_ = s.sessions.msgs.resetUnread(r.Context(), sess.id, body.ChatJid)
+		_ = s.sessions.msgs.resetUnread(r.Context(), sess.id, chatJID.String())
 		if len(ids) > 0 {
 			_ = s.sessions.msgs.updateMessageStatus(r.Context(), sess.id, ids, "READ")
 			s.broker.emitRaw(map[string]any{

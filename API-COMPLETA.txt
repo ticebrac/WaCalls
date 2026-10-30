@@ -1,0 +1,495 @@
+================================================================================
+WACALLS (WaCebrac) - DOCUMENTACAO COMPLETA DA API PARA INTEGRACAO
+================================================================================
+Este arquivo e AUTOSUFICIENTE: contem tudo que uma IA de outro projeto precisa
+para integrar com o WaCebrac (ler conversas, ligar, gerenciar instancias).
+Envie este arquivo inteiro, sem edicao. Complementos no repositorio:
+  - openapi.yaml ... especificacao OpenAPI 3.1 (68 endpoints, schemas)
+  - API.md ......... guia geral humano
+  - API-CRM.md ..... manual detalhado do CRM
+
+Projetos irmãos: servidor Go unico + painel web React ("Wa Cebrac") sobre uma
+conta/contas WhatsApp (whatsmeow), com ligacoes VoIP, gravacoes e mensagens.
+
+
+================================================================================
+1. ACESSO
+================================================================================
+Base URL (padrao):   http://localhost:11000
+Formato:             JSON (UTF-8), Content-Type: application/json
+CORS:                liberado (GET, POST, PUT, PATCH, DELETE)
+
+O servidor precisa ser iniciado com a flag -api-key para habilitar a API do
+CRM e proteger a API Evolution:
+    wa-cebrac.exe -api-key SUA_CHAVE [-addr :11000] [-static client/dist]
+
+Flags relevantes:
+    -api-key                    chave unica (CRM + Evolution)
+    -debug                      logs verbose (wire do WhatsApp)
+    -max-calls-per-session N    limite de ligacoes simultaneas por sessao (0 = sem)
+
+
+================================================================================
+2. AUTENTICACAO
+================================================================================
+Sao 3 superficies com regras diferentes:
+
+  A) CRM  (/api/crm/*)  ... OBRIGATORIO os 2 headers:
+       apikey: SUA_CHAVE            (ou Authorization: Bearer SUA_CHAVE)
+       X-User-Id: <colaborador>     identidade do colaborador
+     Sem -api-key no servidor: 503 {"error":"CRM API disabled: start the server with -api-key"}
+     Sem apikey:                403 {"error":"invalid api key"}
+     Sem X-User-Id:             400 {"error":"X-User-Id header required"}
+
+  B) PAINEL (/api/*)    ... SEM autenticacao.
+       X-Client-Id: <uuid>  opcional; define o operador (dono da ligacao e
+                            limite de "uma ligacao por operador")
+
+  C) EVOLUTION (rotas fora de /api) ... OBRIGATORIO apikey:
+       apikey: SUA_CHAVE   ou   Authorization: Bearer SUA_CHAVE
+       403 {"success":false,"error":{"code":"FORBIDDEN","message":"invalid api key"}}
+
+Exemplo de cabecalho completo:
+    apikey: crm-8d2e04c15f9b367a
+    X-User-Id: ana.paula
+    Content-Type: application/json
+
+Regra de ouro do CRM: TUDO que for ler ou executar por um lead usa o
+X-User-Id como dono. O servidor guarda o dono no primeiro acesso ao lead.
+
+
+================================================================================
+3. API DO CRM  (/api/crm/*)
+================================================================================
+3.1 REGRAS DE ESCOPO (leia antes)
+  - LEAD = um contato. Na primeira toque (POST /leads, POST /calls,
+    GET|POST /leads/{phone}/messages) o lead e REGISTRADO com dono fixo =
+    X-User-Id e com a INSTANCIA DE ORIGEM vigente do colaborador.
+  - Lead ja pertencente a outro colaborador => 403 (nunca vaza conteudo).
+  - Colaborador sem instancia de origem => 409 (definir em /api/crm/origin).
+  - Nada de outro colaborador aparece (lista, mensagens, historico, SSE).
+  - Lead ficara preso a instancia onde nasceu mesmo que a origem mude depois.
+
+3.2 PHONE (normalizacao aceita)
+  Aceita "(41) 99123-5566", "+5541991235566", "5541991235566"...
+  Regra: remove tudo que nao for digito; se tiver <= 11 digitos, prefixa 55.
+  No path use a forma simples: /api/crm/leads/5541991235566/messages
+
+--------------------------------------------------------------------------------
+3.3 MONITORACAO
+--------------------------------------------------------------------------------
+GET /api/crm/status
+  200:
+    {"origin":"<sessionId ou vazio>",
+     "sessions":[{"id","name","jid","state","paired"}],
+     "activeCalls":[{"sessionId","callId","owner","direction","peer",
+                     "startedAt","status"}]}
+  status da ligacao: starting | ringing | connected | ended
+
+GET /api/crm/events            (SSE - text/event-stream)
+  Keepalive ": ping" a cada 20s. Entrega SOMENTE:
+    - session-list, auth-state, session-qr      (para a tela de configuracoes)
+    - message        (apenas de leads do X-User-Id)
+    - call-status, call-ended (apenas com owner = X-User-Id)
+    - call-list      (ja filtrada so para o colaborador)
+  Descarta: mensagens de outros leads, presence, chamadas recebidas.
+  Formato de cada linha: data: {json}\n\n
+  Exemplos:
+    data: {"type":"message","sessionId":"...","message":{...}}
+    data: {"type":"call-status","id":"CALLID","sessionId":"...","owner":"ana.paula","status":"ringing","peer":"5541991235566@s.whatsapp.net","startedAt":1793298797460}
+    data: {"type":"call-ended","id":"CALLID","owner":"ana.paula","reason":"user_ended","endedAt":1793298843187}
+
+--------------------------------------------------------------------------------
+3.4 CONFIGURACOES DO CRM - INSTANCIAS (sessions)
+--------------------------------------------------------------------------------
+GET /api/crm/sessions
+  200 {"sessions":[{"id","name","jid","state","paired"}]}
+
+POST /api/crm/sessions
+  body: {"name":"Comercial 01"}          (name opcional, default "Session")
+  200 {"id":"<hex32>"}                   inicia o pareamento; id = {sid}
+
+GET /api/crm/sessions/{sid}/qr           (polling ate paired=true)
+  200 {"state":"qr","paired":false,"qr":"2@...","qrBase64":"data:image/png;base64,..."}
+  quando pareada: {"state":"open","paired":true}  (sem qr)
+  404 se sessao inexistente
+
+PATCH /api/crm/sessions/{sid}            RENOMEAR
+  body: {"name":"Novo nome"}
+  204 | 400 (name vazio) | 404
+
+POST /api/crm/sessions/{sid}/disconnect   DESCONECTAR (mantem para novo QR)
+  204 | 404
+
+DELETE /api/crm/sessions/{sid}            EXCLUIR (logout + apaga local)
+  204 | 404
+
+--------------------------------------------------------------------------------
+3.5 INSTANCIA DE ORIGEM DO COLABORADOR
+--------------------------------------------------------------------------------
+Qual instancia cada colaborador usa para falar com os leads. Usada no momento
+em que o lead e criado.
+
+GET /api/crm/origin
+  200 {"sessionId":"<hex32>"}   ({"sessionId":""} se nao definida)
+
+PUT /api/crm/origin
+  body: {"sessionId":"<hex32>"}
+  204 | 400 (sem sessionId) | 404 (sessao inexistente)
+
+DELETE /api/crm/origin
+  204   limpa a origem do colaborador
+
+--------------------------------------------------------------------------------
+3.6 LEADS
+--------------------------------------------------------------------------------
+POST /api/crm/leads                     CHAMAR AO ABRIR O MODAL DO LEAD
+  body: {"phone":"(41) 99123-5566","name":"Paulo Henrique Nogueira"}
+  200 {"lead":{"phone":"5541991235566","name":"Paulo Henrique Nogueira",
+               "owner":"ana.paula","sessionId":"<hex32>","createdAt":1793298797460}}
+  Idempotente: se ja for seu devolve igual; se for de outro => 403.
+  400 (sem phone) | 409 (sem origem) | 500
+
+GET /api/crm/leads
+  200 {"leads":[ Lead, ... ]}          (apenas os do X-User-Id, mais recentes primeiro)
+
+DELETE /api/crm/leads/{phone}           LIBERA O CLAIM (reatribuivel)
+  204 | 404 (sem lead) | 400
+
+--------------------------------------------------------------------------------
+3.7 CONVERSA  (botao "Conversar com o lead")
+--------------------------------------------------------------------------------
+GET /api/crm/leads/{phone}/messages?limit=50&before=<timestampMs>
+  Assume o lead automaticamente se ainda nao tiver dono.
+  200 {"lead":Lead,"messages":[StoredMessage, ...]}
+  ORDEM CRESCENTE (mais antiga em cima, mais nova embaixo) - pronta para render.
+  limit: default 50, max 200. before: pagina para tras (use o timestamp da
+  ultima mensagem que voce ja tem).
+
+  StoredMessage:
+    {"id","sessionId","chatJid","senderJid","fromMe":bool,
+     "type","text","fileName?","mimeType?","mediaUrl?","status",
+     "timestamp" (epoch ms),"pushName?"}
+    type: text | ptt | audio | image | video | document | sticker |
+          contact | call_recording | unknown
+    status: PENDING | DELIVERED | READ | PLAYED | INTERNAL
+    mediaUrl: caminho relativo -> prefixar com a base URL
+              (ex.: http://localhost:11000/api/media/<sid>/<arquivo>)
+
+  Erros: 400 (sem phone) | 403 (outro dono) | 404 (instancia do lead excluida)
+         | 409 (sem origem) | 500 | 503 (sessao nao pareada)
+
+POST /api/crm/leads/{phone}/messages
+  body: {"text":"Ola! Tudo bem?"}
+  200 {"id":"<msgId>","timestamp":1793298797460}
+  400 | 403 | 404 | 409 | 500 | 503
+
+--------------------------------------------------------------------------------
+3.8 LIGACOES  (botao "Ligar via WhatsApp")
+--------------------------------------------------------------------------------
+POST /api/crm/calls
+  body: {"phone":"(41) 99123-5566",
+         "name":"Paulo Henrique Nogueira",   // opcional, registra o lead
+         "record": true,                     // opcional, default true
+         "duration_ms": 300000}              // opcional, default 5 min
+  200 {"call":{"callId":"CB599C0C...","sessionId":"<hex32>"}}
+  Disca da instancia de origem do colaborador. owner = X-User-Id.
+
+  Erros:
+    400 sem phone
+    403 lead de outro colaborador | 404 instancia do lead excluida
+    409 sem origem OU colaborador ja em ligacao
+    429 limite de ligacoes simultaneas
+    500 falha ao iniciar | 503 sessao nao pareada
+
+GET /api/crm/calls?limit=50
+  200 {"calls":[ CallLog, ... ]}   (apenas as do X-User-Id, mais recentes)
+  CallLog:
+    {"sessionId","callId","direction","peer","owner?","startedAt","endedAt",
+     "durationMs","recordingMs","endReason","recordingUrl?"}
+    endReason: user_ended | timeout | enc | busy | failed | declined | ...
+    recordingUrl: relativo -> http://localhost:11000/api/recordings/<sid>/<arquivo>.wav
+
+POST /api/crm/calls/{callId}/end
+  204 | 403 (ligacao de outro) | 404 | 503
+
+--------------------------------------------------------------------------------
+3.9 RESUMO DE STATUS HTTP DO CRM
+--------------------------------------------------------------------------------
+  400 body/header invalido        403 chave errada ou recurso de outro dono
+  404 sessao/ligacao inexistente  409 sem origem / ja em ligacao
+  429 limite de ligacoes          500 erro interno {"error":"..."}
+  503 API desabilitada ou sessao nao pareada
+
+
+================================================================================
+4. FLUXOS DE INTEGRACAO PRONTOS (CRM)
+================================================================================
+4.1 AO ABRIR O MODAL DE UM LEAD
+    POST /api/crm/leads  {"phone": <celular do lead>, "name": <nome do lead>}
+    -> fixa o dono. A partir dai so este X-User-Id ve e liga.
+
+4.2 BOTAO "LIGAR VIA WHATSAPP"
+    POST /api/crm/calls  {"phone": <celular>, "name": <nome>}
+    -> {"call":{"callId":...}}
+    Acompanhar por GET /api/crm/status (activeCalls) ou SSE (call-status,
+    call-ended). Encerrar: POST /api/crm/calls/{callId}/end.
+
+4.3 BOTAO "CONVERSAR COM O LEAD"
+    GET  /api/crm/leads/{phone}/messages        -> renderiza (ordem crescente)
+    POST /api/crm/leads/{phone}/messages {"text"} -> envia
+    SSE  /api/crm/events (evento "message")      -> respostas em tempo real
+    Para carregar mais antigas: repita com ?before=<timestamp da mais antiga>.
+
+4.4 TELA DE CONFIGURACOES DO CRM
+    GET    /api/crm/sessions                      lista
+    POST   /api/crm/sessions {"name"}             cria -> id
+    GET    /api/crm/sessions/{sid}/qr             exibe qrBase64 (polling)
+    PATCH  /api/crm/sessions/{sid} {"name"}       renomeia
+    POST   /api/crm/sessions/{sid}/disconnect     desconecta
+    DELETE /api/crm/sessions/{sid}                exclui
+    PUT    /api/crm/origin {"sessionId": <sid>}   origem do colaborador
+    (o X-User-Id de quem faz a chamada define a quem a origem pertence)
+
+4.5 EXEMPLO COMPLETO EM JS (fetch)
+    const BASE = "http://localhost:11000";
+    const H = { "Content-Type": "application/json",
+                apikey: "SUA_CHAVE", "X-User-Id": "ana.paula" };
+
+    // assumir lead
+    await fetch(`${BASE}/api/crm/leads`, { method: "POST", headers: H,
+      body: JSON.stringify({ phone: "(41) 99123-5566", name: "Paulo" }) });
+
+    // conversa
+    const r = await fetch(`${BASE}/api/crm/leads/5541991235566/messages`, { headers: H });
+    const { messages } = await r.json();          // mais antiga primeiro
+
+    // enviar
+    await fetch(`${BASE}/api/crm/leads/5541991235566/messages`, { method: "POST",
+      headers: H, body: JSON.stringify({ text: "Bom dia!" }) });
+
+    // ligar
+    const c = await fetch(`${BASE}/api/crm/calls`, { method: "POST", headers: H,
+      body: JSON.stringify({ phone: "(41) 99123-5566", name: "Paulo" }) });
+    const { call } = await c.json();              // call.callId
+
+    // eventos
+    const es = new EventSource(`${BASE}/api/crm/events?apikey=SUA_CHAVE&X-User-Id=ana.paula`);
+    // EventSource NAO envia headers -> para SSE do CRM use fetch+ReadableStream
+    // ou servidor proxy; o painel (/api/events) aceita query clientId.
+
+4.6 EXEMPLO EM CURL
+    BASE=http://localhost:11000
+    H=(-H "apikey: SUA_CHAVE" -H "X-User-Id: ana.paula")
+
+    curl "${H[@]}" $BASE/api/crm/status
+    curl "${H[@]}" -X POST -H "Content-Type: application/json" \
+      -d '{"name":"Comercial 01"}' $BASE/api/crm/sessions
+    curl "${H[@]}" $BASE/api/crm/sessions/ID/qr
+    curl "${H[@]}" -X PUT -H "Content-Type: application/json" \
+      -d '{"sessionId":"ID"}' $BASE/api/crm/origin
+    curl "${H[@]}" -X POST -H "Content-Type: application/json" \
+      -d '{"phone":"(41) 99123-5566","name":"Paulo"}' $BASE/api/crm/leads
+    curl "${H[@]}" "$BASE/api/crm/leads/5541991235566/messages?limit=50"
+    curl "${H[@]}" -X POST -H "Content-Type: application/json" -d '{"text":"Oi"}' \
+      $BASE/api/crm/leads/5541991235566/messages
+    curl "${H[@]}" -X POST -H "Content-Type: application/json" \
+      -d '{"phone":"(41) 99123-5566"}' $BASE/api/crm/calls
+    curl "${H[@]}" -X POST $BASE/api/crm/calls/CALLID/end
+
+NOTA SOBRE SSE + EventSource: o EventSource do navegador nao permite headers.
+Para /api/crm/events use um proxy que injete os headers, ou o navegador com
+fetch + ReadableStream. /api/events (painel) nao tem auth e aceita clientId
+como query param.
+
+
+================================================================================
+5. API DO PAINEL  (/api/*)  -  SEM AUTENTICACAO
+================================================================================
+{sid} = id da instancia (hex32). X-Client-Id opcional (operador).
+
+SESSIONS
+  GET    /api/sessions                     -> {"sessions":[{id,name,jid,state,paired}]}
+  POST   /api/sessions {"name"}            -> {"id"}         (inicia QR)
+  DELETE /api/sessions/{sid}               -> 204
+  GET    /api/sessions/{sid}/qr            -> {state,paired,qr?,qrBase64?}
+  POST   /api/sessions/{sid}/pair          -> 204 | 400
+  POST   /api/sessions/{sid}/logout        -> 204
+
+CHATS / MENSAGENS
+  GET  /api/sessions/{sid}/chats           -> {"chats":[ChatSummary]}
+       ChatSummary: {sessionId,jid,name,isGroup,unread,lastText,lastType,
+                     lastFromMe,lastAt}   (mais ativa primeiro)
+  GET  /api/sessions/{sid}/messages?chat=<jid>&limit=50&before=<ms>
+                                          -> {"messages":[StoredMessage]}
+       ATENCAO: ordem DESC (mais nova PRIMEIRO) - ao contrario do CRM.
+  POST /api/sessions/{sid}/messages {"number"|"chatJid","text"}
+                                          -> {"id","timestamp"}
+  POST /api/sessions/{sid}/messages/media
+       {"number"|"chatJid","mediatype","media","caption?","fileName?",
+        "ptt?","gifPlayback?","seconds?"}
+       mediatype: image|video|audio|document|sticker (default image)
+       media: base64 | data:<mime>;base64,... | http(s):// (max 64MB)
+                                          -> {"id","timestamp"}
+  POST /api/sessions/{sid}/messages/contact {"number"|"chatJid","name","phone"}
+                                          -> {"id","timestamp"}
+  POST /api/sessions/{sid}/chats/read {"chatJid"}      -> {"status":"ok"}
+  POST /api/sessions/{sid}/presence {"jid?","state?"}
+       state: "recording" | "paused" | outro = digitando; sem jid = conta
+                                          -> {"status":"ok"}
+  POST /api/sessions/{sid}/check-number {"numbers":[...]}
+                                          -> {"numbers":[{exists,jid,number}]}
+  POST /api/sessions/{sid}/profile-picture {"jid"}     -> {"url"} ("" se nao ha)
+  GET  /api/media/{sid}/{file}             -> binario da midia recebida
+
+LIGACOES
+  POST /api/sessions/{sid}/calls {"phone","duration_ms?","record?"}
+                                          -> {"call":{"callId"}}
+       erros: 400 phone | 403 key | 404 sessao | 409 operador em ligacao
+              | 429 limite | 500 | 503 nao pareada
+  GET  /api/sessions/{sid}/calls?limit=50&peer=<numero>
+                                          -> {"calls":[CallLog]} (historico)
+  GET  /api/sessions/{sid}/calls/{id}     -> CallLog (objeto solto)
+  POST /api/sessions/{sid}/calls/{id}/webrtc {"sdp_offer"}
+                                          -> {"sdp_answer"}
+       (2 passos no navegador: POST .../calls e depois .../webrtc)
+  POST /api/sessions/{sid}/calls/{id}/accept     -> {"call":{...}} | 409
+  POST /api/sessions/{sid}/calls/{id}/reject     -> {"status":"ok"}
+  DELETE /api/sessions/{sid}/calls/{id}          -> 204
+  GET  /api/sessions/{sid}/history               -> {"rows":[LiveCall]} (50 em memoria)
+  GET  /api/recordings/{sid}/{file}              -> WAV da gravacao
+
+EVENTOS DO PAINEL
+  GET /api/events?clientId=<uuid>   (SSE; snapshot inicial + keepalive 20s)
+  tipos: session-list, auth-state, session-qr, message, message-status,
+         message-media, presence, chat-presence, call-status, call-ended,
+         call-list, incoming, incoming-claimed
+
+ERROS DO PAINEL: sempre {"error":"<mensagem>"} com o status HTTP.
+
+
+================================================================================
+6. API EVOLUTION  (compativel Evolution API v2)  -  apikey OBRIGATORIA
+================================================================================
+{instance} = id/nome da instancia. Envelope de erro em TODAS as rotas:
+  {"success":false,"error":{"code":"<CODE>","message":"..."}}
+  codes: BAD_REQUEST(400) FORBIDDEN(403) NOT_FOUND(404) CONFLICT(409)
+         INTERNAL(500) SERVICE_UNAVAILABLE(503)
+
+Envelope de mensagem enviada (rotas de envio respondem 201):
+  {"key":{"remoteJid","fromMe":true,"id"},
+   "messageTimestamp":"<segundos unix como string>","status":"PENDING"}
+
+INSTANCIAS
+  POST   /instance/create {"instanceName","integration?","webhook"?}
+         -> 201 {"instance":{"instanceName","status":"created"},
+                 "hash":{"apikey","instanceName"}}
+         409 se ja existe
+  GET    /instance/fetchInstances
+         -> 200 [{id,name,instanceName,state,integration,number,owner,
+                  profileName,totalChat,totalChatWithoutMessage}]
+  GET    /instance/connect/{instance}   (polling do QR)
+         -> 200 {"pairing":true,"code":"2@...","base64":"data:image/png;base64,...","count":1}
+         -> 200 {"pairing":false,"code":"","base64":"","count":0}  (conectado)
+         503 = QR ainda nao pronto (repetir em instantes); 404 = inexistente
+  GET    /instance/connectionState/{instance}
+         -> 200 {"instance":{"instanceName","state":"open"|"close"|"connecting"}}
+  POST   /instance/logout/{instance}     -> 200 {...,"status":"logout"}
+  POST   /instance/reconnect/{instance}  -> 200 {...,"status":"connecting"}
+  DELETE /instance/{instance}            -> 200 {...,"status":"deleted"}  (nao 204)
+
+MENSAGENS (todas 201)
+  POST /message/sendText/{instance}
+       {"number","text","textMessage"?,"delay"?,"linkPreview"?,
+        "mentionsEveryOne"?,"mentioned"?}   (ultimos 3 ignorados)
+  POST /message/sendMedia/{instance}
+       {"number","mediatype","media","caption?","fileName?","ptt?",
+        "gifPlayback?","delay?","seconds?"}
+       mediatype: image|video|audio|document|sticker (default image)
+       ptt:true + audio => servidor converte p/ OGG-Opus (requer ffmpeg no PATH;
+       sem ffmpeg vira audio comum). media: base64 ou URL.
+  POST /message/react/{instance}     {"number","reaction","key":{id,remoteJid,fromMe?,participant?}}
+  POST /message/delete/{instance}    {"key":{id,...},"onlyForMe?"}
+                                      (400 se onlyForMe em mensagem recebida)
+  POST /message/edit/{instance}      {"number","messageId","text"}
+  POST /message/sendStatus/{instance} {"text"|"media","mediatype?","caption?"}
+                                      -> remoteJid = status@broadcast
+                                      ("text" e normalizado para "image")
+
+CHATS
+  POST /chat/WhatsAppNumbers/{instance}        {"numbers":[...]}
+         -> 200 [{exists,jid,number,name?}]
+  POST /chat/checkIsRegisteredUser/{instance}  {"number"}
+         -> 200 {"exists":bool,"number"}
+  POST /chat/fetchProfilePictureUrl/{instance} {"number"|"jid"}
+         -> 200 {"url"} ("" se nao ha)
+  POST /chat/sendPresence/{instance}           {"number?","presence?"}
+         -> 200 {"presence":"sent"}
+  POST /chat/readMessages/{instance}           {"readMessages":[{id,remoteJid,fromMe?,participant?}]}
+         -> 200 {"read":N}
+
+GRUPOS
+  POST /group/create/{instance}   {"subject","participants"?} -> 201 {creator,id,subject}
+  GET  /group/all/{instance}      -> 200 [{id,subject,owner,size,
+                                          participants:[{id,admin,isAdmin,isSuper}]}]
+  POST /group/inviteCode/{instance}      {"number"=JID do grupo} -> {inviteCode,inviteUrl}
+  POST /group/revokeInviteCode/{instance}{"number"}              -> {inviteCode,inviteUrl}
+  POST /group/join/{instance}     {"inviteCode"}  (codigo ou URL) -> {status:"success",group}
+  POST /group/leave/{instance}    {"number"}      -> {status:"success"}
+  GET  /group/participants/{instance}/{group}    -> GroupInfo
+  POST /group/participants/{add|remove|promote|demote}/{instance}
+         {"groupJid"|"number","participants":[...]} -> {participants:[...]}
+  POST /group/updateSubject/{instance}       {"number","subject"}   -> {status:"success"}
+  POST /group/updateDescription/{instance}   {"number","description"}-> {status:"success"}
+  POST /group/sendMessage/{instance}         {"number"=JID grupo,"text"} -> 201
+
+WEBHOOKS
+  POST /webhook/set/{instance}  {"webhook":{"enabled","url","webhookByEvents","events":[...]}}
+                               -> 200 {"webhooks":{...}}
+  GET  /webhook/find/{instance} -> 200 {"webhooks":{...}} ({} se nao ha)
+
+
+================================================================================
+7. LIGACAO PELO PAINEL vs PELO CRM (para nao confundir)
+================================================================================
+CRM  : 1 chamada  POST /api/crm/calls -> servidor faz sinalizacao WhatsApp e
+       devolve callId. Nao ha passo de SDP do lado do integrador.
+Painel: 2 chamadas - POST /api/sessions/{sid}/calls (sinaliza) e depois
+       POST /api/sessions/{sid}/calls/{id}/webrtc com o SDP do navegador
+       (trocada de midia WebRTC browser<->servidor). So necessario quando o
+       browser vai falar.
+
+
+================================================================================
+8. LIMITES E CUIDADOS
+================================================================================
+- Ordem das mensagens: CRM = ASC (crescente); Painel = DESC (decrescente).
+- limit maximo: mensagens 200 (default 50); historico de ligacoes 500 (default 50).
+- DDI: numeros com <= 11 digitos recebem 55 automaticamente.
+- Gravacoes .wav em data/recordings/<sid>/; midias em data/media/...
+  Servidas por /api/recordings e /api/media (validam nome de arquivo).
+- Todo evento SSE e membro do broker (sem persistencia): reconecte e refaca
+  GET ao abrir a tela.
+- Chamada simultanea: 1 por X-User-Id (409 se repetir) e um teto por sessao (429).
+- Voz/PTT precisa de OGG-Opus; a conversa usa ffmpeg (flag FFMPEG_PATH se
+  nao estiver no PATH). Sem ffmpeg, audio sai como arquivo comum.
+- Segredos: a chave mora no flag -api-key do servidor; nunca hardcode em
+  frontend publico (use proxy no seu CRM para guardar a chave).
+- Para ligar, o colaborador precisa de origem definida e a sessao pareada.
+
+
+================================================================================
+9. CATALOGO RAPIDO DE STATUS HTTP (as 3 superficies)
+================================================================================
+  200 ok | 201 criado/aceito (Evolution) | 204 sem conteudo
+  400 body/query invalido, X-User-Id ausente (CRM)
+  403 chave errada (as 3) | lead/ligacao de outro usuario (CRM)
+  404 sessao, ligacao, instancia ou lead inexistente
+  409 sem instancia de origem | operador em ligacao | instancia ja existe (Evolution)
+  429 limite de ligacoes simultaneas
+  500 erro interno -> {"error":"..."} (painel/CRM) | {"success":false,...} (Evolution)
+  503 CRM desabilitada (sem -api-key) ou sessao nao pareada |
+       Evolution: QR ainda nao pronto
+================================================================================
+FIM DO DOCUMENTO
+================================================================================

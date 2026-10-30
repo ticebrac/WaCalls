@@ -6,16 +6,18 @@ import { Button } from "@/components/ui/button";
 import { DeviceSelector } from "@/components/form/DeviceSelector";
 import { useStartCall } from "@/hooks/useStartCall";
 import { useDevices } from "@/stores/devices";
+import { toWhatsAppPhone } from "@/utils/phone";
 
 export const Dialer = ({ sid }: { sid: string }) => {
   const [phone, setPhone] = useState("");
-  const [record, setRecord] = useState(false);
+  const [record, setRecord] = useState(true);
   const micId = useDevices((s) => s.micId);
   const startCall = useStartCall(sid, micId);
 
   const submit = () => {
-    if (!phone.trim() || startCall.isPending) return;
-    startCall.mutate({ phone: phone.trim(), record }, { onSuccess: () => setPhone("") });
+    const number = toWhatsAppPhone(phone);
+    if (!number || startCall.isPending) return;
+    startCall.mutate({ phone: number, record }, { onSuccess: () => setPhone("") });
   };
 
   return (
@@ -32,7 +34,7 @@ export const Dialer = ({ sid }: { sid: string }) => {
             onKeyDown={(e) => {
               if (e.key === "Enter") submit();
             }}
-            placeholder="+55 11 99999 9999"
+            placeholder="11 99999 9999 (+55 por padrão)"
             inputMode="tel"
             className="min-w-[200px] flex-1"
           />
@@ -46,7 +48,7 @@ export const Dialer = ({ sid }: { sid: string }) => {
             <Disc3 className="h-4 w-4" />
             Record
           </Button>
-          <Button onClick={submit} disabled={startCall.isPending || !phone.trim()}>
+          <Button onClick={submit} disabled={startCall.isPending || !toWhatsAppPhone(phone)}>
             <Phone className="h-4 w-4" />
             {startCall.isPending ? "Calling…" : "Call"}
           </Button>

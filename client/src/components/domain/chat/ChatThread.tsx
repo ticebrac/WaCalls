@@ -1,5 +1,6 @@
+import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
-import { FileText, Check, CheckCheck, Clock } from "lucide-react";
+import { Contact, FileText, Check, CheckCheck, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types/chat";
 
@@ -23,6 +24,37 @@ const StatusIcon = ({ status }: { status: string }) => {
 };
 
 const BubbleContent = ({ m }: { m: ChatMessage }) => {
+  if (m.type === "contact") {
+    return (
+      <div className="flex items-center gap-2 text-sm">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background/60">
+          <Contact className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="truncate font-medium">{m.text || "Contato"}</div>
+          {m.fileName && <div className="text-xs opacity-80">+{m.fileName}</div>}
+        </div>
+      </div>
+    );
+  }
+  if (m.type === "call_recording") {
+    const href = m.mediaUrl
+      ? m.mediaUrl.startsWith("http")
+        ? m.mediaUrl
+        : `${window.location.origin}${m.mediaUrl}`
+      : "";
+    return (
+      <div className="space-y-1 text-sm">
+        <div className="font-semibold">LIGAÇÃO DE WHATSAPP</div>
+        {m.text && <div className="text-xs opacity-80">Duração {m.text}</div>}
+        {href && (
+          <a href={href} target="_blank" rel="noreferrer" className="block text-xs underline underline-offset-4 hover:opacity-80">
+            Abrir link da gravação
+          </a>
+        )}
+      </div>
+    );
+  }
   if (m.mediaUrl) {
     switch (m.type) {
       case "image":
@@ -59,10 +91,12 @@ export const ChatThread = ({
   messages,
   title,
   subtitle,
+  headerAction,
 }: {
   messages: ChatMessage[];
   title: string;
   subtitle: string;
+  headerAction?: ReactNode;
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const count = messages.length;
@@ -73,9 +107,12 @@ export const ChatThread = ({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b px-4 py-3">
-        <div className="text-sm font-semibold">{title}</div>
-        <div className="text-xs text-muted-foreground">{subtitle}</div>
+      <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{title}</div>
+          <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
+        </div>
+        {headerAction}
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
         {messages.map((m) => (

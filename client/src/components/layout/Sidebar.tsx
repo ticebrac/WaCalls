@@ -1,7 +1,16 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { setActiveSession, useSessions } from "@/stores/sessions";
@@ -20,15 +29,22 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
   const activeId = useSessions((s) => s.activeId);
   const [creating, setCreating] = useState(false);
   const [toDelete, setToDelete] = useState<SessionInfo | null>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const [newName, setNewName] = useState("");
 
-  const onNew = async () => {
+  const onNew = async (e: FormEvent) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
     setCreating(true);
     try {
-      const { id } = await createSession("WhatsApp");
+      const { id } = await createSession(name);
       setActiveSession(id);
+      setNewOpen(false);
+      setNewName("");
       onNavigate?.();
-    } catch (e) {
-      toast.error((e as Error).message);
+    } catch (err) {
+      toast.error((err as Error).message);
     } finally {
       setCreating(false);
     }
@@ -79,10 +95,39 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
         ))}
         {sessions.length === 0 && <p className="px-2 text-sm text-muted-foreground">No accounts yet.</p>}
       </div>
-      <Button variant="outline" className="w-full" onClick={onNew} disabled={creating}>
-        {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+      <Button variant="outline" className="w-full" onClick={() => setNewOpen(true)}>
+        <Plus className="h-4 w-4" />
         New session
       </Button>
+
+      <Dialog open={newOpen} onOpenChange={(o) => !creating && setNewOpen(o)}>
+        <DialogContent>
+          <form onSubmit={onNew} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>New account</DialogTitle>
+              <DialogDescription>
+                Dê um nome para identificar esta conta. Em seguida, aparecerá o QR code para parear no WhatsApp.
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              autoFocus
+              placeholder="Ex.: Comercial 01"
+              value={newName}
+              maxLength={60}
+              onChange={(e) => setNewName(e.target.value)}
+            />
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setNewOpen(false)} disabled={creating}>
+                Cancelar
+              </Button>
+              <Button type="submit" disabled={creating || !newName.trim()}>
+                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                Criar e mostrar QR
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <ConfirmDialog
         open={!!toDelete}

@@ -54,6 +54,8 @@ type Broker struct {
 	history []CallRecord
 
 	SnapshotFn func() []any
+	// OnCallEnded runs once per call when it leaves the broker (after the record is final).
+	OnCallEnded func(ended CallRecord, reason string)
 }
 
 func NewBroker() *Broker {
@@ -181,16 +183,23 @@ func (b *Broker) endCall(id, reason string) {
 		"type": "call-ended", "sessionId": sessionID, "id": id, "owner": owner, "reason": reason, "endedAt": now,
 	})
 	b.broadcastCallList()
+	if b.OnCallEnded != nil {
+		b.OnCallEnded(ended, reason)
+	}
 }
 
-func (b *Broker) broadcastCallList() {
+func (b *Broker) activeCalls() []CallRecord {
 	b.mu.RLock()
+	defer b.mu.RUnlock()
 	list := make([]CallRecord, 0, len(b.calls))
 	for _, c := range b.calls {
 		list = append(list, *c)
 	}
-	b.mu.RUnlock()
-	b.broadcast(map[string]any{"type": "call-list", "calls": list})
+	return list
+}
+
+func (b *Broker) broadcastCallList() {
+	b.broadcast(map[string]any{"type": "call-list", "calls": b.activeCalls()})
 }
 
 func (b *Broker) emitIncoming(sessionID, id, peer string) {

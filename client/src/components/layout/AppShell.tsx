@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from "react";
-import { Menu, PhoneCall } from "lucide-react";
+import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { ThemeToggle } from "./ThemeToggle";
+import { CebracLogo } from "./CebracLogo";
 
 export const AppShell = ({ children, viewSwitch }: { children: ReactNode; viewSwitch?: ReactNode }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -23,10 +24,7 @@ export const AppShell = ({ children, viewSwitch }: { children: ReactNode; viewSw
               <Sidebar onNavigate={() => setMobileOpen(false)} />
             </SheetContent>
           </Sheet>
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <PhoneCall className="h-4 w-4" />
-          </span>
-          <span className="text-lg font-semibold tracking-tight">WaCalls</span>
+          <CebracLogo />
         </div>
         <div className="flex items-center gap-2">
           {viewSwitch}

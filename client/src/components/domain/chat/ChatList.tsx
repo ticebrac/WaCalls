@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { cn } from "@/lib/utils";
 import type { ChatSummary } from "@/types/chat";
+import { toWhatsAppPhone } from "@/utils/phone";
 
 const formatTime = (ts: number): string => {
   if (!ts) return "";
@@ -14,6 +15,9 @@ const formatTime = (ts: number): string => {
 
 const previewOf = (c: ChatSummary): string => {
   if (c.lastType === "text") return c.lastText;
+  if (c.lastType === "call_recording") return "Gravação da ligação";
+  if (c.lastType === "contact") return "Contato";
+  if (c.lastType === "ptt" || c.lastType === "audio") return "Áudio";
   if (!c.lastText) return c.lastType ? `[${c.lastType}]` : "";
   return c.lastText;
 };
@@ -35,9 +39,9 @@ export const ChatList = ({
     : chats;
 
   const startNew = () => {
-    const digits = newNumber.replace(/\D/g, "");
-    if (!digits) return;
-    onOpen(`${digits}@s.whatsapp.net`);
+    const number = toWhatsAppPhone(newNumber);
+    if (!number) return;
+    onOpen(`${number}@s.whatsapp.net`);
     setNewNumber("");
   };
 
@@ -55,13 +59,13 @@ export const ChatList = ({
         </div>
         <div className="flex gap-2">
           <Input
-            placeholder="New chat: number"
+            placeholder="New chat: number (+55 default)"
             value={newNumber}
             onChange={(e) => setNewNumber(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && startNew()}
             className="text-sm"
           />
-          <Button size="sm" onClick={startNew} disabled={!newNumber.replace(/\D/g, "")}>
+          <Button size="sm" onClick={startNew} disabled={!toWhatsAppPhone(newNumber)}>
             Open
           </Button>
         </div>

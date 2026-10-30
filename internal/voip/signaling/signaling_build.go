@@ -3,6 +3,9 @@ package signaling
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/wanode"
 
@@ -11,7 +14,9 @@ import (
 )
 
 var (
-	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x07}
+	// offer/accept capability blob; the preaccept variant differs in the last
+	// byte (…bb 07) and WhatsApp rejects a swap.
+	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x13}
 	capabilityPreaccept = []byte{0x01, 0x05, 0xff, 0x09, 0xe4, 0xbb, 0x07}
 )
 
@@ -36,8 +41,10 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 
 	var offerContent []waBinary.Node
 
+	hasPrivacy := false
 	if token, err := sock.GetTCToken(ctx, wanode.MustJID(wanode.CleanJID(peerJid.String()))); err == nil && len(token) > 0 {
 		offerContent = append(offerContent, waBinary.Node{Tag: "privacy", Content: token})
+		hasPrivacy = true
 	}
 
 	offerContent = append(offerContent,
@@ -53,16 +60,33 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 	offerContent = append(offerContent,
 		waBinary.Node{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
 		waBinary.Node{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityOffer},
-		waBinary.Node{Tag: "destination", Content: destinations},
-		waBinary.Node{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
 	)
-	if includeDeviceIdentity {
+	// Child order is load-bearing: privacy -> audio(8k) -> audio(16k) -> net ->
+	// capability -> (destination | enc) -> encopt -> device-identity. A single
+	// callee device takes a bare <enc>; only multi-device fan-out gets wrapped
+	// in <destination>, and any other shape is rejected with error 439.
+	//
+	// Devices whose call key had to be wrapped with pre-keys (type="pkmsg")
+	// are dropped: WhatsApp rejects an offer carrying one with error 439, so
+	// only callee devices we already share a Signal session with can take part.
+	destinations = establishedSessionDevices(destinations)
+	if len(destinations) == 0 {
+		return waBinary.Node{}, fmt.Errorf("no callee device with an established Signal session for %s", peerJid)
+	}
+	// WhatsApp's servers accept the <destination> wrapper regardless of how
+	// many devices it holds; a bare <enc> (the documented single-device form)
+	// is answered with error 439.
+	offerContent = append(offerContent, waBinary.Node{Tag: "destination", Content: destinations})
+	offerContent = append(offerContent, waBinary.Node{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}})
+	// <device-identity> exists to support pre-key wrapping; with every <enc>
+	// running over an established session it must be omitted as well.
+	if includeDeviceIdentity && hasEncType(destinations, "pkmsg") {
 		if di, ok := sock.AccountDeviceIdentityNode(); ok {
 			offerContent = append(offerContent, di)
 		}
 	}
 
-	return waBinary.Node{
+	offer := waBinary.Node{
 		Tag:   "call",
 		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
@@ -70,7 +94,31 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 			Attrs:   waBinary.Attrs{"call-id": callID, "call-creator": creator},
 			Content: offerContent,
 		}},
-	}, nil
+	}
+	slog.Default().Info("call offer built",
+		"peer", peerJid, "devices", len(destinations), "privacy", hasPrivacy,
+		"device_identity", includeDeviceIdentity, "children", ChildTags(offerContent))
+	return offer, nil
+}
+
+// ChildTags renders nodes (with one nesting level) so an offer/ack layout can
+// be checked straight from a log line.
+func ChildTags(nodes []waBinary.Node) string {
+	tags := make([]string, 0, len(nodes))
+	for _, c := range nodes {
+		c := c
+		sub := wanode.NodeChildren(&c)
+		if len(sub) == 0 {
+			tags = append(tags, c.Tag)
+			continue
+		}
+		subTags := make([]string, 0, len(sub))
+		for _, s := range sub {
+			subTags = append(subTags, s.Tag)
+		}
+		tags = append(tags, c.Tag+"["+strings.Join(subTags, ",")+"]")
+	}
+	return strings.Join(tags, " ")
 }
 
 func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
@@ -114,8 +162,44 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 	}, nil
 }
 
-func extractEncFromParticipant(nodes []waBinary.Node) *waBinary.Node {
-	for _, n := range nodes {
+// encType reports the Signal message type of a <to> entry: "msg" when it runs
+// over an established session, "pkmsg" when it had to use pre-keys.
+func encType(to *waBinary.Node) string {
+	for _, c := range wanode.NodeChildren(to) {
+		if c.Tag == "enc" {
+			return wanode.AttrString(c.Attrs, "type")
+		}
+	}
+	return ""
+}
+
+// establishedSessionDevices prefers <to> entries wrapped over an established
+// Signal session (type="msg"). Callee devices that would need pre-keys are only
+// used as a last resort: WhatsApp answers a pre-key call key with
+// terminate reason="enc", so a mixed offer must not carry them.
+func establishedSessionDevices(destinations []waBinary.Node) []waBinary.Node {
+	kept := make([]waBinary.Node, 0, len(destinations))
+	for i := range destinations {
+		if encType(&destinations[i]) == "msg" {
+			kept = append(kept, destinations[i])
+		}
+	}
+	if len(kept) == 0 {
+		return destinations
+	}
+	return kept
+}
+
+func hasEncType(destinations []waBinary.Node, want string) bool {
+	for i := range destinations {
+		if encType(&destinations[i]) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func extractEncFromParticipant(nodes []waBinary.Node) *waBinary.Node {	for _, n := range nodes {
 		n := n
 		if n.Tag == "enc" {
 			return &n

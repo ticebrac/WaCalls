@@ -380,6 +380,7 @@ func (s *server) evoSendMedia(w http.ResponseWriter, r *http.Request) {
 		PTT         bool   `json:"ptt"`
 		GIFPlayback bool   `json:"gifPlayback"`
 		Delay       int    `json:"delay"`
+		Seconds     uint32 `json:"seconds"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		evoError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
@@ -396,7 +397,7 @@ func (s *server) evoSendMedia(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(time.Duration(body.Delay) * time.Millisecond)
 	}
 	peer := chatJIDFromInput(body.Number)
-	resp, err := sess.sendMediaMessage(r.Context(), peer, body.Mediatype, body.Media, body.Caption, body.FileName, body.PTT, body.GIFPlayback)
+	resp, err := sess.sendMediaMessage(r.Context(), peer, body.Mediatype, body.Media, body.Caption, body.FileName, body.PTT, body.GIFPlayback, body.Seconds)
 	if err != nil {
 		if ee, ok := err.(*apiError); ok {
 			evoError(w, ee.status, ee.code, ee.message)
@@ -432,7 +433,7 @@ func (s *server) evoSendStatus(w http.ResponseWriter, r *http.Request) {
 		if mt == "text" {
 			mt = "image"
 		}
-		r2, e := sess.sendMediaMessage(r.Context(), statusJID, mt, body.Media, body.Caption, "", false, false)
+		r2, e := sess.sendMediaMessage(r.Context(), statusJID, mt, body.Media, body.Caption, "", false, false, 0)
 		err = e
 		if e == nil {
 			result = statusSendResult{id: r2.ID, ts: r2.Timestamp}

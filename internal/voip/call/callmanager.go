@@ -36,6 +36,14 @@ type CallManager struct {
 	acceptedByJid         string
 	debeEnabled           bool
 
+	// Incoming RTP counters, read from the relay goroutine under mu. They say
+	// whether the peer's audio stops at the relay, at SRTP or at the codec.
+	rtpRecv     int
+	rtpDrop     int
+	rtpUnprot   int
+	rtpDecoded  int
+	rtpLastLog  time.Time
+
 	encodeBuf    []float32
 	encodeBufPos int
 
@@ -91,7 +99,15 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	if creator.IsEmpty() {
 		creator = m.sock.OwnPN()
 	}
+	// WhatsApp only routes an offer addressed by the peer's hidden LID. Targeting
+	// the phone-number form makes the server answer <ack error="439"> and the
+	// call never leaves our side. ResolveLIDForPN falls back to the address as
+	// given when no mapping exists, so an unresolved peer still reaches the wire
+	// (and fails with a surfaced error rather than silently).
 	resolved := m.sock.ResolveLIDForPN(ctx, peerJid)
+	if resolved != peerJid {
+		m.log.Info("call offer target resolved", "input", peerJid.String(), "resolved", resolved.String())
+	}
 
 	call := NewOutgoingCall(callID, resolved.String(), creator.String(), mediaType)
 	callKey := media.GenerateCallKey()
@@ -115,15 +131,22 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	if err != nil {
 		return err
 	}
+	if ackNode == nil {
+		// Query only returns a nil node with a nil error on timeout. Treating
+		// that as success skipped HandleCallAck entirely: no relays, no
+		// preaccept, and a call stuck in initiating while the UI said "Calling…".
+		m.log.Error("call offer got no ack from WhatsApp", "call_id", callID, "peer", resolved.String())
+		terminate := signaling.BuildTerminateStanza(resolved, callID, creator)
+		go func() { _, _ = m.sock.Query(context.Background(), terminate) }()
+		return &CallError{"WhatsApp did not acknowledge the call offer"}
+	}
 
 	m.mu.Lock()
 	_ = m.currentCall.ApplyTransition(Transition{Type: TransitionOfferSent})
 	m.emitState()
 	m.mu.Unlock()
 
-	if ackNode != nil {
-		go m.HandleCallAck(context.Background(), ackNode)
-	}
+	go m.HandleCallAck(context.Background(), ackNode)
 
 	m.log.Info("call offer sent", "call_id", callID, "peer", resolved.String())
 	return nil
